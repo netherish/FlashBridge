@@ -20,6 +20,8 @@
 
 Or browse [all releases](https://github.com/netherish/FlashBridge/releases).
 
+Before installing, check the [compatibility reports](docs/TESTED_DEVICES.md) and the [security policy](SECURITY.md).
+
 ---
 
 ## What is FlashBridge?
@@ -35,6 +37,20 @@ It speaks the **fastboot** and **ADB** protocols directly over Android's USB Hos
 │  (no root)      │  bulk USB      │                      │
 └─────────────────┘                └──────────────────────┘
 ```
+
+---
+
+## Screenshots
+
+Real UI captures from the v1.6 build on an unrooted Android phone.
+
+| Flash queue | Fastboot tools | ADB tools |
+|:---:|:---:|:---:|
+| <img src="assets/screenshots/01-flash.png" width="220" alt="Flash tab"> | <img src="assets/screenshots/02-fastboot.png" width="220" alt="Fastboot tab"> | <img src="assets/screenshots/03-adb.png" width="220" alt="ADB tab"> |
+
+| MediaTek detection | BYO DA / auth / raw memory | Console |
+|:---:|:---:|:---:|
+| <img src="assets/screenshots/04-mtk.png" width="220" alt="MTK tab"> | <img src="assets/screenshots/06-mtk-details.png" width="220" alt="MTK advanced tools"> | <img src="assets/screenshots/05-console.png" width="220" alt="Console tab"> |
 
 ---
 

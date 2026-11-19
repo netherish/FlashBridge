@@ -1,0 +1,52 @@
+name: Compatibility report
+description: Report a working (or non-working) device/cable combination
+title: "[Compatibility]: "
+labels: ["compatibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Your report helps others know whether FlashBridge works on their hardware.
+        Please remove any personally identifying information from logs.
+  - type: dropdown
+    id: role
+    attributes:
+      label: Device role
+      options:
+        - "Host phone (running FlashBridge)"
+        - "Target device (being flashed)"
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      placeholder: "Make / model / Android version"
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Target mode
+      options:
+        - "Fastboot"
+        - "ADB"
+        - "Recovery / sideload"
+        - "MediaTek BROM / preloader"
+        - "Not applicable (host)"
+    validations:
+      required: true
+  - type: input
+    id: cable
+    attributes:
+      label: OTG cable / adapter
+      placeholder: "USB-C to USB-A OTG, brand/unknown"
+    validations:
+      required: false
+  - type: textarea
+    id: result
+    attributes:
+      label: Result
+      description: Which actions succeeded or failed? Include Console output if useful.
+    validations:
+      required: true

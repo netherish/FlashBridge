@@ -1,0 +1,56 @@
+name: Bug report
+description: Something in FlashBridge did not work as expected
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please never include IMEIs, serial numbers, or private keys.
+        Flashing tools can be dangerous — describe what happened before any write operation.
+  - type: input
+    id: version
+    attributes:
+      label: FlashBridge version
+      description: Release version, e.g. 1.6
+      placeholder: "1.6"
+    validations:
+      required: true
+  - type: input
+    id: host
+    attributes:
+      label: Host phone
+      description: Make, model and Android version of the phone running FlashBridge
+      placeholder: "Pixel 7 / Android 14"
+    validations:
+      required: true
+  - type: input
+    id: target
+    attributes:
+      label: Target device
+      description: Make, model, and mode (fastboot / ADB / recovery / MTK BROM)
+      placeholder: "Device X / fastboot"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Include the exact steps and the log output from the Console tab.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+  - type: dropdown
+    id: destructive
+    attributes:
+      label: Did the problem occur during a write/flash action?
+      options:
+        - "No"
+        - "Yes"
+    validations:
+      required: true
