@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- lightning bolt / flash — amber -->
+    <path
+        android:fillColor="#FFB300"
+        android:pathData="M58,26 L38,58 L52,58 L46,82 L72,46 L56,46 L64,26 Z" />
+    <!-- bridge line -->
+    <path
+        android:fillColor="#00E5FF"
+        android:pathData="M34,86 h40 v3 h-40 z" />
+</vector>
