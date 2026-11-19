@@ -122,7 +122,7 @@ fun FlashBridgeScreen(vm: MainViewModel, onPickFiles: () -> Unit) {
                 }
 
                 when (tab) {
-                    0 -> FlashTab(state, vm, busy, onPickFiles)
+                    0 -> FlashTab(state, vm, busy, onPickFiles) { title, action -> confirm = title to action }
                     1 -> FastbootTab(state, vm, busy) { title, action -> confirm = title to action }
                     2 -> AdbTab(state, vm, busy, shellCmd, { shellCmd = it },
                         pushPath = pushPath, onPushPath = { pushPath = it })
@@ -131,7 +131,7 @@ fun FlashBridgeScreen(vm: MainViewModel, onPickFiles: () -> Unit) {
                 }
 
                 Text(
-                    "Developed by netherish · v1.4 · All rights reserved",
+                    "Developed by netherish · v1.5 · All rights reserved",
                     color = TextMuted, fontSize = 11.sp,
                     modifier = Modifier.align(Alignment.CenterHorizontally).padding(bottom = 8.dp),
                 )
@@ -155,7 +155,13 @@ fun FlashBridgeScreen(vm: MainViewModel, onPickFiles: () -> Unit) {
 // ---- Flash tab -----------------------------------------------------------
 
 @Composable
-private fun FlashTab(state: UiState, vm: MainViewModel, busy: Boolean, onPickFiles: () -> Unit) {
+private fun FlashTab(
+    state: UiState,
+    vm: MainViewModel,
+    busy: Boolean,
+    onPickFiles: () -> Unit,
+    confirm: (String, () -> Unit) -> Unit,
+) {
     val fastbootReady = state.deviceMode == DeviceMode.FASTBOOT
     val adbReady = state.deviceMode == DeviceMode.ADB || state.deviceMode == DeviceMode.RECOVERY
 
@@ -250,6 +256,52 @@ private fun FlashTab(state: UiState, vm: MainViewModel, busy: Boolean, onPickFil
             fastbootReady && state.queue.isNotEmpty() && !busy) { vm.bootImage() }
         ActionButton("Sideload ZIP", Icons.Filled.SystemUpdate, Modifier.weight(1f),
             adbReady && state.queue.isNotEmpty() && !busy) { vm.adbSideload() }
+    }
+
+    SectionTitle("After flashing — factory reset")
+    Card(colors = CardDefaults.cardColors(containerColor = Surface), shape = RoundedCornerShape(14.dp)) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                "Most custom ROMs need data wiped after flashing — otherwise you can bootloop or get stuck on encryption. Format data first.",
+                color = Warning, fontSize = 11.sp, lineHeight = 15.sp,
+            )
+            Button(
+                onClick = { confirm("Factory reset the device?") { vm.factoryReset() } },
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                enabled = fastbootReady && !busy,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Error,
+                    contentColor = Color.White,
+                    disabledContainerColor = SurfaceHigh,
+                    disabledContentColor = TextMuted,
+                ),
+                shape = RoundedCornerShape(12.dp),
+            ) {
+                Icon(Icons.Filled.RestartAlt, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("FACTORY RESET (format data + cache)", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ActionButton("Format data", Icons.Filled.FormatSize, Modifier.weight(1f),
+                    fastbootReady && !busy) { confirm("Format userdata?") { vm.formatData() } }
+                ActionButton("Wipe cache", Icons.Filled.DeleteSweep, Modifier.weight(1f),
+                    fastbootReady && !busy) { vm.wipeCache() }
+            }
+            Button(
+                onClick = { vm.rebootFastboot() },
+                modifier = Modifier.fillMaxWidth().height(44.dp),
+                enabled = fastbootReady && !busy,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Success, contentColor = Color(0xFF00220F),
+                    disabledContainerColor = SurfaceHigh, disabledContentColor = TextMuted,
+                ),
+                shape = RoundedCornerShape(12.dp),
+            ) {
+                Icon(Icons.Filled.PowerSettingsNew, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Reboot system", fontWeight = FontWeight.Bold)
+            }
+        }
     }
 }
 
@@ -461,13 +513,20 @@ private fun MtkTab(state: UiState, mtkStatus: MtkState) {
                     }
                 }
             } else {
+                val arming = mtkStatus is MtkState.Arming
                 val msg = when (mtkStatus) {
+                    is MtkState.Arming ->
+                        "Watching USB… power the phone off, hold Volume Up (or Volume Down) + Power, then plug in the cable. It will be detected automatically the moment it enters BROM."
                     is MtkState.NoDevice -> mtkStatus.message
                     is MtkState.Error -> mtkStatus.message
-                    is MtkState.NeedPermission -> "Approve USB permission, then Detect again"
-                    else -> "Power off the phone, hold Volume Up or Volume Down, then connect USB. Press Detect."
+                    is MtkState.NeedPermission -> "Approve the USB permission prompt now"
+                    else -> "Press Detect, then power off the phone, hold Volume Up or Volume Down and connect USB."
                 }
-                Text(msg, color = TextMuted, fontSize = 12.sp)
+                if (arming) {
+                    CircularProgressIndicator(Modifier.size(20.dp), color = Cyan, strokeWidth = 2.dp)
+                    Spacer(Modifier.height(8.dp))
+                }
+                Text(msg, color = if (arming) Cyan else TextMuted, fontSize = 12.sp)
             }
         }
     }
@@ -545,6 +604,7 @@ private fun StatusCard(
         DeviceMode.MTK -> Amber to "MediaTek device identified ✓"
         DeviceMode.NONE -> {
             val problem = when {
+                mtkStatus is MtkState.Arming -> "Watching USB for a MediaTek device…"
                 adbStatus is AdbState.NeedPermission || usbStatus is UsbState.NeedPermission -> "Approve the USB prompt"
                 adbStatus is AdbState.Error -> adbStatus.message
                 usbStatus is UsbState.Error -> usbStatus.message

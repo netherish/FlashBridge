@@ -13,7 +13,9 @@ import android.hardware.usb.UsbManager
 import android.os.Build
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -43,6 +45,9 @@ class MtkUsb(private val context: Context) {
     private var bulkOut: UsbEndpoint? = null
     private var bulkIn: UsbEndpoint? = null
 
+    private var armed = false
+    private var monitorJob: Job? = null
+
     private val _status = MutableStateFlow<MtkState>(MtkState.Idle)
     val status: StateFlow<MtkState> = _status
 
@@ -66,6 +71,20 @@ class MtkUsb(private val context: Context) {
         }
     }
 
+    /** Fires the instant a device is plugged in while we are armed. */
+    private val attachReceiver = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context, intent: Intent) {
+            if (intent.action != UsbManager.ACTION_USB_DEVICE_ATTACHED) return
+            val dev: UsbDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+            }
+            if (dev != null && isMtkDevice(dev)) onMtkDeviceAppeared(dev)
+        }
+    }
+
     init {
         val filter = IntentFilter(ACTION_USB_PERMISSION)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -78,7 +97,10 @@ class MtkUsb(private val context: Context) {
     fun hasUsbHost(): Boolean =
         context.packageManager.hasSystemFeature("android.hardware.usb.host")
 
-    /** Scan for a MediaTek BROM/preloader device. */
+    /**
+     * Scan now, and if nothing is connected stay armed so the device is
+     * picked up the instant it enters BROM/preloader mode.
+     */
     fun scan() {
         if (!hasUsbHost()) {
             _status.value = MtkState.Error("No USB host support")
@@ -86,9 +108,50 @@ class MtkUsb(private val context: Context) {
         }
         val dev = usbManager.deviceList.values.firstOrNull { isMtkDevice(it) }
         if (dev == null) {
-            _status.value = MtkState.NoDevice("No MediaTek BROM/preloader device found")
+            arm()
             return
         }
+        disarm()
+        onMtkDeviceAppeared(dev)
+    }
+
+    /** Start listening for a MediaTek device to appear. */
+    private fun arm() {
+        if (armed) return
+        armed = true
+        _status.value = MtkState.Arming
+        try {
+            val filter = IntentFilter(UsbManager.ACTION_USB_DEVICE_ATTACHED)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                context.registerReceiver(attachReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                context.registerReceiver(attachReceiver, filter)
+            }
+        } catch (_: Throwable) {}
+
+        // Broadcasts can be missed when a preloader port appears and vanishes
+        // within seconds, so also poll the device list while armed.
+        monitorJob = scope.launch {
+            while (armed) {
+                val dev = usbManager.deviceList.values.firstOrNull { isMtkDevice(it) }
+                if (dev != null) {
+                    onMtkDeviceAppeared(dev)
+                    break
+                }
+                delay(600)
+            }
+        }
+    }
+
+    private fun disarm() {
+        armed = false
+        monitorJob?.cancel()
+        monitorJob = null
+        try { context.unregisterReceiver(attachReceiver) } catch (_: Throwable) {}
+    }
+
+    private fun onMtkDeviceAppeared(dev: UsbDevice) {
+        disarm()
         _info.value = MtkInfo.basic(dev.toInfo())
         if (usbManager.hasPermission(dev)) {
             scope.launch { connect(dev) }
@@ -251,6 +314,7 @@ class MtkUsb(private val context: Context) {
     // ---- Helpers ----------------------------------------------------------
 
     fun close() {
+        disarm()
         try { connection?.close() } catch (_: Throwable) {}
         connection = null
         bulkIn = null
@@ -357,6 +421,7 @@ data class MtkInfo(
 
 sealed class MtkState {
     object Idle : MtkState()
+    object Arming : MtkState()
     object NeedPermission : MtkState()
     data class NoDevice(val message: String) : MtkState()
     data class Connected(val info: MtkInfo) : MtkState()

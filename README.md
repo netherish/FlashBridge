@@ -8,7 +8,7 @@
 ![Platform](https://img.shields.io/badge/Platform-Android-3DDC84?logo=android&logoColor=white)
 ![Status](https://img.shields.io/badge/Status-working-brightgreen)
 
-[⬇️ **Download FlashBridge APK (v1.4)**](https://github.com/netherish/FlashBridge/releases/download/v1.4/flashbridge.apk)
+[⬇️ **Download FlashBridge APK (v1.5)**](https://github.com/netherish/FlashBridge/releases/download/v1.5/flashbridge.apk)
 
 </div>
 
@@ -16,7 +16,7 @@
 
 ## Download
 
-**[Download the latest APK (v1.4)](https://github.com/netherish/FlashBridge/releases/download/v1.4/flashbridge.apk)** — Android 8.0+ · no root required
+**[Download the latest APK (v1.5)](https://github.com/netherish/FlashBridge/releases/download/v1.5/flashbridge.apk)** — Android 8.0+ · no root required
 
 Or browse [all releases](https://github.com/netherish/FlashBridge/releases).
 
@@ -49,6 +49,7 @@ It speaks the **fastboot** and **ADB** protocols directly over Android's USB Hos
 ### Fastboot tools
 - ⚡ Full command suite: `flash`, `boot`, `erase`, `format`, `wipe`, `getvar all`, `set_active`, `flashing unlock/lock`, `unlock_critical`, `oem`, raw commands
 - 🔀 A/B slot switching, reboot to system / recovery / fastboot / continue
+- 🧹 **Post-flash factory reset** — format data + metadata + cache, then reboot, right after flashing (prevents encryption bootloops)
 - 🛡️ Safety confirmations on every destructive action
 
 ### ADB tools
@@ -63,7 +64,7 @@ It speaks the **fastboot** and **ADB** protocols directly over Android's USB Hos
 - 🌐 Universal fastboot detection by USB interface class — works across vendors
 - 📊 Live transfer progress, device info panel, and full session log
 - 🎨 Tabbed Material 3 advanced interface (Flash / Fastboot / ADB / MTK / Console)
-- 📟 **MediaTek identification** — BROM/preloader handshake, chipset + security flag readout on the MTK tab
+- 📟 **MediaTek identification** — BROM/preloader handshake, chipset + security flag readout, and **instant auto-detect**: press Detect once, then plug the phone in and it is picked up the moment it enters BROM
 
 ---
 
@@ -85,6 +86,8 @@ It speaks the **fastboot** and **ADB** protocols directly over Android's USB Hos
 Android's USB Host API lets an app claim a connected USB device's bulk endpoints. Both ADB and fastboot are just protocols over those endpoints.
 
 ### Detect
+
+After flashing a custom ROM, use the **After flashing** card on the Flash tab: **Factory reset** (format userdata + metadata + cache), then **Reboot system**. Formatting userdata clears the old encryption state, which is the usual cause of bootloops.
 
 Press **Detect device**. FlashBridge scans USB devices:
 

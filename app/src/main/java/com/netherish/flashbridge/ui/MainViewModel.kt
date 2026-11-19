@@ -97,6 +97,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         append("✓ MediaTek device: ${i.chipName}")
                         append("HW code 0x%04X · HW ver 0x%04X · BROM ${i.bromVer}".format(i.hwCode, i.hwVer))
                     }
+                    is MtkState.Arming -> append("Watching USB — plug in the MTK device / hold the volume key now")
                     is MtkState.NeedPermission -> append("Approve the USB permission prompt for the MTK device")
                     is MtkState.Error -> append("⚠ MTK: ${st.message}")
                     else -> {}
@@ -271,6 +272,29 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun wipe() = action("wipe") {
         fastboot.wipe()
         append("✓ Wipe complete")
+    }
+
+    /** Format userdata — clears encryption state after a custom ROM flash. */
+    fun formatData() = action("format:userdata") {
+        fastboot.format("userdata")
+        append("✓ Data formatted")
+    }
+
+    fun formatMetadata() = action("format:metadata") {
+        fastboot.format("metadata")
+        append("✓ Metadata formatted")
+    }
+
+    fun wipeCache() = action("erase:cache") {
+        fastboot.erase("cache")
+        append("✓ Cache wiped")
+    }
+
+    /** The full post-flash reset most custom ROMs require. */
+    fun factoryReset() = action("factory reset") {
+        val results = fastboot.factoryReset()
+        results.forEach { append("  $it") }
+        append("✓ Factory reset complete")
     }
 
     fun setActive(slot: String) = action("set_active $slot") {

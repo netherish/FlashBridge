@@ -287,6 +287,22 @@ class FastbootUsb(private val context: Context) {
     fun format(partition: String) = simple("format:$partition")
     fun wipe() = simple("wipe")
     fun oem(command: String): String = simple("oem $command").joinToString("\n")
+
+    /**
+     * Full post-flash factory reset. `format:userdata` is the important step:
+     * it rebuilds the filesystem and drops encryption metadata, which is what
+     * prevents bootloops after flashing a custom ROM over an encrypted device.
+     * Metadata/cache are best-effort because not every device exposes them.
+     */
+    fun factoryReset(): List<String> {
+        val results = mutableListOf<String>()
+        results += "userdata: " + simple("format:userdata").joinToString(" ")
+        try { results += "metadata: " + simple("format:metadata").joinToString(" ") }
+        catch (e: Throwable) { results += "metadata: skipped (${e.message ?: "unsupported"})" }
+        try { results += "cache: " + simple("erase:cache").joinToString(" ") }
+        catch (e: Throwable) { results += "cache: skipped (${e.message ?: "unsupported"})" }
+        return results
+    }
     fun flashingGetUnlockAbility(): String = getvar("unlock_ability")
     fun deviceState(): String = getvar("state")
     fun isUnlocked(): Boolean = try {
