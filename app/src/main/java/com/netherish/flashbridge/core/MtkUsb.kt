@@ -54,6 +54,9 @@ class MtkUsb(private val context: Context) {
     private val _info = MutableStateFlow<MtkInfo?>(null)
     val info: StateFlow<MtkInfo?> = _info
 
+    private val _progress = MutableStateFlow("")
+    val progress: StateFlow<String> = _progress
+
     private val permissionReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
             if (ACTION_USB_PERMISSION != intent.action) return
@@ -231,6 +234,223 @@ class MtkUsb(private val context: Context) {
         }
     }
 
+    // ---- User-supplied DA / authorization --------------------------------
+
+    /**
+     * Send a user-provided authorization blob (BROM SLA / DAA auth file).
+     * The bytes come from the user's own storage — this app never ships one.
+     */
+    fun sendAuth(data: ByteArray) {
+        if (data.isEmpty()) throw IOException("Empty auth file")
+        if (!echo(CMD_SEND_AUTH)) throw IOException("Device rejected SEND_AUTH (0xE2)")
+        val payload = padEven(data)
+        writeBytes(be32(payload.size))
+        val echoed = readBe32()
+        if (echoed != payload.size) {
+            throw IOException("Auth length mismatch (0x%08X)".format(echoed))
+        }
+        when (val status = readBe16()) {
+            0x1D0C -> throw IOException("Device reports no auth needed")
+            in 0x00..0xFF -> Unit
+            else -> throw IOException("Auth rejected (status 0x%04X)".format(status))
+        }
+        uploadData(payload, "auth")
+    }
+
+    /** Send a user-provided root certificate (CMD 0xE0). */
+    fun sendCert(data: ByteArray) {
+        if (data.isEmpty()) throw IOException("Empty certificate")
+        if (!echo(CMD_SEND_CERT)) throw IOException("Device rejected SEND_CERT (0xE0)")
+        val payload = padEven(data)
+        writeBytes(be32(payload.size))
+        when (val status = readBe16()) {
+            in 0x00..0xFF -> Unit
+            else -> throw IOException("Certificate rejected (status 0x%04X)".format(status))
+        }
+        uploadData(payload, "certificate")
+    }
+
+    /**
+     * Upload one DA stage to the device. [address] and [signatureLength] come
+     * from the user's DA header, so they are always chipset-matched by the
+     * person who supplied the file.
+     */
+    fun sendDa(data: ByteArray, address: Int, signatureLength: Int) {
+        if (data.isEmpty()) throw IOException("Empty DA stage")
+        val sigLen = signatureLength.coerceIn(0, data.size)
+        val payload = padEven(data)
+        checksum(payload).let { _progress.value = "DA checksum 0x%08X".format(it) }
+
+        if (!echo(CMD_SEND_DA)) throw IOException("Device rejected SEND_DA (0xD7)")
+        if (!echoBytes(be32(address))) throw IOException("DA address not echoed")
+        if (!echoBytes(be32(payload.size))) throw IOException("DA size not echoed")
+        if (!echoBytes(be32(sigLen))) throw IOException("DA signature length not echoed")
+
+        when (val status = readBe16()) {
+            0x1D0D -> throw IOException("SLA required — add the matching auth file in the MTK tab")
+            in 0x00..0xFF -> Unit
+            else -> throw IOException("DA upload rejected (status 0x%04X)".format(status))
+        }
+        uploadData(payload, "DA stage")
+    }
+
+    /** Hand execution to an uploaded 32-bit DA stage. */
+    fun jumpDa(address: Int) {
+        if (!echo(CMD_JUMP_DA)) throw IOException("Device rejected JUMP_DA (0xD5)")
+        writeBytes(be32(address))
+        val echoed = readBe32()
+        if (echoed != address) throw IOException("Jump address mismatch (0x%08X)".format(echoed))
+        when (val status = readBe16()) {
+            in 0x00..0xFF -> _status.value = MtkState.DaRunning(_info.value)
+            else -> throw IOException("Jump failed (status 0x%04X)".format(status))
+        }
+    }
+
+    /** Hand execution to a 64-bit DA stage (0xDE). */
+    fun jumpDa64(address: Int) {
+        if (!echo(CMD_JUMP_DA64)) throw IOException("Device rejected JUMP_DA64 (0xDE)")
+        writeBytes(be32(address))
+        val echoed = readBe32()
+        if (echoed != address) throw IOException("Jump address mismatch (0x%08X)".format(echoed))
+        if (!echo(0x01)) throw IOException("64-bit mode not accepted")
+        when (val status = readBe16()) {
+            in 0x00..0xFF -> _status.value = MtkState.DaRunning(_info.value)
+            else -> throw IOException("64-bit jump failed (status 0x%04X)".format(status))
+        }
+    }
+
+    /** Raw 32-bit memory read (BROM / DA command 0xD1). */
+    fun read32(address: Int, count: Int): List<Int> {
+        if (!echo(CMD_READ32)) throw IOException("Device rejected READ32 (0xD1)")
+        if (!echoBytes(be32(address))) throw IOException("Read address not echoed")
+        if (!echoBytes(be32(count))) throw IOException("Read count not echoed")
+        when (val status = readBe16()) {
+            in 0x00..0xFF -> Unit
+            else -> throw IOException("Read32 rejected (status 0x%04X)".format(status))
+        }
+        val raw = readBytes(count * 4, 5000)
+        val values = (0 until count).map { be32Int(raw, it * 4) }
+        when (val status = readBe16()) {
+            in 0x00..0xFF -> return values
+            else -> throw IOException("Read32 failed (status 0x%04X)".format(status))
+        }
+    }
+
+    /** Raw 32-bit memory write (BROM / DA command 0xD4). */
+    fun write32(address: Int, values: List<Int>) {
+        if (!echo(CMD_WRITE32)) throw IOException("Device rejected WRITE32 (0xD4)")
+        if (!echoBytes(be32(address))) throw IOException("Write address not echoed")
+        if (!echoBytes(be32(values.size))) throw IOException("Write count not echoed")
+        when (val status = readBe16()) {
+            in 0x00..0xFF -> Unit
+            else -> throw IOException("Write32 rejected (status 0x%04X)".format(status))
+        }
+        values.forEach { if (!echoBytes(be32(it))) throw IOException("Write value not echoed") }
+        when (val status = readBe16()) {
+            in 0x00..0xFF -> Unit
+            else -> throw IOException("Write32 failed (status 0x%04X)".format(status))
+        }
+    }
+
+    /** Read the chip's unique ME_ID if the device exposes it. */
+    fun readMeId(): String = readIdentifier(CMD_GET_ME_ID)
+
+    /** Read the chip's SOC_ID if the device exposes it. */
+    fun readSocId(): String = readIdentifier(CMD_GET_SOC_ID)
+
+    private fun readIdentifier(cmd: Int): String {
+        if (!echo(CMD_GET_BL_VER)) return ""
+        if (!echo(cmd)) return ""
+        val length = readBe32()
+        if (length <= 0 || length > 128) return ""
+        val raw = readBytes(length, 3000)
+        readBe16() // status
+        return raw.joinToString("") { "%02X".format(it) }
+    }
+
+    @Throws(IOException::class)
+    private fun uploadData(data: ByteArray, label: String) {
+        val localChecksum = checksum(data)
+        var offset = 0
+        val chunkSize = 4096
+        while (offset < data.size) {
+            val size = minOf(chunkSize, data.size - offset)
+            val chunk = data.copyOfRange(offset, offset + size)
+            writeBytes(chunk)
+            offset += size
+            _progress.value = "$label: $offset / ${data.size} bytes"
+            if (offset % 0x2000 == 0) writeBytes(byteArrayOf())
+        }
+        writeBytes(byteArrayOf()) // zero-length terminator
+        val deviceChecksum = readBe16()
+        when (val status = readBe16()) {
+            in 0x00..0xFF -> {
+                if (deviceChecksum != 0 && deviceChecksum != (localChecksum and 0xFFFF)) {
+                    _progress.value = "$label uploaded (checksum mismatch warning)"
+                }
+                _progress.value = ""
+            }
+            else -> throw IOException("$label upload failed (status 0x%04X)".format(status))
+        }
+    }
+
+    private fun checksum(data: ByteArray): Int {
+        var sum = 0
+        var i = 0
+        while (i + 1 < data.size) {
+            sum = (sum + ((data[i].toInt() and 0xFF) or ((data[i + 1].toInt() and 0xFF) shl 8))) and 0xFFFFFFFF.toInt()
+            i += 2
+        }
+        if (i < data.size) sum = (sum + (data[i].toInt() and 0xFF)) and 0xFFFFFFFF.toInt()
+        return sum
+    }
+
+    private fun padEven(data: ByteArray): ByteArray =
+        if (data.size % 2 == 0) data else data + byteArrayOf(0)
+
+    private fun be32(value: Int): ByteArray = byteArrayOf(
+        (value ushr 24).toByte(),
+        (value ushr 16).toByte(),
+        (value ushr 8).toByte(),
+        value.toByte(),
+    )
+
+    private fun readBe32(): Int {
+        val b = readBytes(4, 5000)
+        return be32Int(b, 0)
+    }
+
+    private fun be32Int(b: ByteArray, off: Int): Int =
+        ((b[off].toInt() and 0xFF) shl 24) or
+            ((b[off + 1].toInt() and 0xFF) shl 16) or
+            ((b[off + 2].toInt() and 0xFF) shl 8) or
+            (b[off + 3].toInt() and 0xFF)
+
+    private fun readBe16(): Int {
+        val b = readBytes(2, 5000)
+        return ((b[0].toInt() and 0xFF) shl 8) or (b[1].toInt() and 0xFF)
+    }
+
+    private fun echoBytes(bytes: ByteArray): Boolean {
+        writeBytes(bytes)
+        val echoed = readBytes(bytes.size, 5000)
+        return echoed.contentEquals(bytes)
+    }
+
+    private fun writeBytes(bytes: ByteArray) {
+        if (bytes.isEmpty()) {
+            connection!!.bulkTransfer(bulkOut, ByteArray(0), 0, 3000)
+            return
+        }
+        var off = 0
+        while (off < bytes.size) {
+            val len = minOf(4096, bytes.size - off)
+            val n = connection!!.bulkTransfer(bulkOut, bytes, off, len, 10000)
+            if (n != len) throw IOException("MTK bulk write failed at $off")
+            off += len
+        }
+    }
+
     // ---- Low-level protocol ----------------------------------------------
 
     private fun handshake() {
@@ -338,6 +558,15 @@ class MtkUsb(private val context: Context) {
         private const val CMD_GET_BL_VER = 0xFE
         private const val CMD_GET_VERSION = 0xFF
         private const val CMD_GET_TARGET_CONFIG = 0xD8
+        private const val CMD_READ32 = 0xD1
+        private const val CMD_WRITE32 = 0xD4
+        private const val CMD_JUMP_DA = 0xD5
+        private const val CMD_SEND_DA = 0xD7
+        private const val CMD_JUMP_DA64 = 0xDE
+        private const val CMD_SEND_CERT = 0xE0
+        private const val CMD_GET_ME_ID = 0xE1
+        private const val CMD_SEND_AUTH = 0xE2
+        private const val CMD_GET_SOC_ID = 0xE7
 
         fun isMtkDevice(device: UsbDevice): Boolean {
             if (device.vendorId != 0x0E8D) return false
@@ -425,5 +654,6 @@ sealed class MtkState {
     object NeedPermission : MtkState()
     data class NoDevice(val message: String) : MtkState()
     data class Connected(val info: MtkInfo) : MtkState()
+    data class DaRunning(val info: MtkInfo?) : MtkState()
     data class Error(val message: String) : MtkState()
 }

@@ -8,6 +8,7 @@ import com.netherish.flashbridge.core.AdbState
 import com.netherish.flashbridge.core.AdbUsb
 import com.netherish.flashbridge.core.FastbootUsb
 import com.netherish.flashbridge.core.FileUtils
+import com.netherish.flashbridge.core.MtkDa
 import com.netherish.flashbridge.core.MtkInfo
 import com.netherish.flashbridge.core.MtkState
 import com.netherish.flashbridge.core.MtkUsb
@@ -41,6 +42,9 @@ data class UiState(
     val progress: String = "",
     val lastResultOk: Boolean? = null,
     val mtkInfo: MtkInfo? = null,
+    val mtkProgress: String = "",
+    val daFile: MtkDa.DaFile? = null,
+    val authFiles: List<MtkDa.AuthFile> = emptyList(),
     val queue: List<FlashItem> = emptyList(),
     val defaultPartition: String = "boot",
     val selectedFile: String = "",
@@ -59,6 +63,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val usbDevice: StateFlow<UsbInfo?> = fastboot.deviceInfo
     val adbDevice: StateFlow<UsbInfo?> = adb.deviceInfo
     val mtkInfo: StateFlow<MtkInfo?> = mtk.info
+    val mtkProgress: StateFlow<String> = mtk.progress
 
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state
@@ -99,9 +104,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     is MtkState.Arming -> append("Watching USB — plug in the MTK device / hold the volume key now")
                     is MtkState.NeedPermission -> append("Approve the USB permission prompt for the MTK device")
+                    is MtkState.DaRunning -> append("✓ DA stage running on device")
                     is MtkState.Error -> append("⚠ MTK: ${st.message}")
                     else -> {}
                 }
+            }
+        }
+        viewModelScope.launch {
+            mtk.progress.collect { p ->
+                _state.value = _state.value.copy(mtkProgress = p)
+                if (p.isEmpty()) append("✓ MTK transfer complete")
             }
         }
     }
@@ -387,6 +399,118 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         append("✓ Reboot sent — device is going $target")
         adb.close()
         _state.value = _state.value.copy(deviceMode = DeviceMode.NONE)
+    }
+
+    // ---- MediaTek DA / authorization -------------------------------------
+
+    /** Parse and recognise a user-supplied Download Agent file. */
+    fun loadDa(uri: Uri) = action("read DA file") {
+        val da = withContext(Dispatchers.IO) { MtkDa.parseDa(getApplication(), uri) }
+        _state.value = _state.value.copy(daFile = da)
+        append("✓ DA: ${da.name}")
+        append("  ${da.protocol.label} · ${da.fileId} · v${da.version}")
+        append("  Chipsets: ${da.entries.joinToString(", ") { "0x%04X".format(it.hwCode) }}")
+        val info = _state.value.mtkInfo
+        if (info != null) {
+            val match = da.supports(info.hwCode)
+            append(if (match) "  ✓ DA matches connected chip 0x%04X".format(info.hwCode)
+                   else "  ⚠ DA does NOT list connected chip 0x%04X".format(info.hwCode))
+        }
+        append("  SHA-256: ${da.sha256}")
+    }
+
+    fun clearDa() {
+        _state.value = _state.value.copy(daFile = null)
+        append("DA file cleared")
+    }
+
+    /** Add user-supplied BROM/CERT authorization files. */
+    fun loadAuth(uris: List<Uri>) = action("read auth files") {
+        val ctx = getApplication<Application>()
+        val files = withContext(Dispatchers.IO) {
+            uris.map { MtkDa.parseAuth(ctx, it) }
+        }
+        _state.value = _state.value.copy(authFiles = _state.value.authFiles + files)
+        files.forEach { append("✓ Auth: ${it.kind} — ${it.name} (${it.sha256.take(16)}…)") }
+    }
+
+    fun clearAuth() {
+        _state.value = _state.value.copy(authFiles = emptyList())
+        append("Authorization files cleared")
+    }
+
+    /**
+     * Upload one DA stage and jump to it. Everything outside the app — the
+     * DA, the auth files and the chipset match — is supplied or confirmed by
+     * the user.
+     */
+    fun bootDa(entryIndex: Int, regionIndex: Int, use64: Boolean) = action("boot DA stage") {
+        val da = _state.value.daFile ?: throw IllegalStateException("Add a DA file first")
+        val info = _state.value.mtkInfo ?: throw IllegalStateException("Detect an MTK device first")
+        val entry = da.entries.getOrNull(entryIndex)
+            ?: throw IllegalStateException("DA chipset entry not found")
+        if (entry.hwCode != 0 && entry.hwCode != info.hwCode) {
+            throw IllegalStateException(
+                "DA is for 0x%04X, device is 0x%04X".format(entry.hwCode, info.hwCode)
+            )
+        }
+        val region = entry.regions.getOrNull(regionIndex)
+            ?: throw IllegalStateException("DA region not found")
+        val ctx = getApplication<Application>()
+
+        _state.value.authFiles.forEach { auth ->
+            val data = withContext(Dispatchers.IO) {
+                ctx.contentResolver.openInputStream(auth.uri)?.use { it.readBytes() }
+                    ?: throw IllegalStateException("Cannot read ${auth.name}")
+            }
+            append("→ Sending ${auth.kind}: ${auth.name}")
+            withContext(Dispatchers.IO) {
+                if (auth.name.contains("cert", true) || auth.kind.contains("cert", true)) {
+                    mtk.sendCert(data)
+                } else {
+                    mtk.sendAuth(data)
+                }
+            }
+            append("✓ ${auth.name} accepted")
+        }
+
+        val stage = withContext(Dispatchers.IO) { MtkDa.readRegion(ctx, da.uri, region) }
+        append("→ Uploading DA stage to 0x%08X (%s bytes)".format(region.address, stage.size))
+        withContext(Dispatchers.IO) {
+            mtk.sendDa(stage, region.address, region.signatureLength)
+        }
+        append("✓ DA stage uploaded, jumping…")
+        withContext(Dispatchers.IO) {
+            if (use64) mtk.jumpDa64(region.address) else mtk.jumpDa(region.address)
+        }
+        append("✓ DA is running — the device is now under DA control")
+    }
+
+    /** Read raw 32-bit words from the device (hex address, decimal count). */
+    fun mtkRead32(addressHex: String, countText: String) = action("read32") {
+        val address = parseHex(addressHex)
+        val count = countText.trim().toIntOrNull()?.coerceIn(1, 1024)
+            ?: throw IllegalStateException("Count must be 1–1024")
+        val values = withContext(Dispatchers.IO) { mtk.read32(address, count) }
+        val out = values.mapIndexed { i, v -> "0x%08X: 0x%08X".format(address + i * 4, v) }
+            .joinToString("\n")
+        append(out)
+        _state.value = _state.value.copy(terminal = out)
+    }
+
+    fun mtkWrite32(addressHex: String, valuesHex: String) = action("write32") {
+        val address = parseHex(addressHex)
+        val values = valuesHex.split(Regex("[\\s,]+"))
+            .filter { it.isNotBlank() }
+            .map { parseHex(it) }
+        if (values.isEmpty()) throw IllegalStateException("Enter at least one hex value")
+        withContext(Dispatchers.IO) { mtk.write32(address, values) }
+        append("✓ Wrote ${values.size} word(s) at 0x%08X".format(address))
+    }
+
+    private fun parseHex(text: String): Int {
+        val clean = text.trim().removePrefix("0x").removePrefix("0X")
+        return clean.toIntOrNull(16) ?: throw IllegalStateException("Invalid hex value: $text")
     }
 
     // ---- Shared ----------------------------------------------------------

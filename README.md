@@ -8,7 +8,7 @@
 ![Platform](https://img.shields.io/badge/Platform-Android-3DDC84?logo=android&logoColor=white)
 ![Status](https://img.shields.io/badge/Status-working-brightgreen)
 
-[⬇️ **Download FlashBridge APK (v1.5)**](https://github.com/netherish/FlashBridge/releases/download/v1.5/flashbridge.apk)
+[⬇️ **Download FlashBridge APK (v1.6)**](https://github.com/netherish/FlashBridge/releases/download/v1.6/flashbridge.apk)
 
 </div>
 
@@ -16,7 +16,7 @@
 
 ## Download
 
-**[Download the latest APK (v1.5)](https://github.com/netherish/FlashBridge/releases/download/v1.5/flashbridge.apk)** — Android 8.0+ · no root required
+**[Download the latest APK (v1.6)](https://github.com/netherish/FlashBridge/releases/download/v1.6/flashbridge.apk)** — Android 8.0+ · no root required
 
 Or browse [all releases](https://github.com/netherish/FlashBridge/releases).
 
@@ -64,7 +64,8 @@ It speaks the **fastboot** and **ADB** protocols directly over Android's USB Hos
 - 🌐 Universal fastboot detection by USB interface class — works across vendors
 - 📊 Live transfer progress, device info panel, and full session log
 - 🎨 Tabbed Material 3 advanced interface (Flash / Fastboot / ADB / MTK / Console)
-- 📟 **MediaTek identification** — BROM/preloader handshake, chipset + security flag readout, and **instant auto-detect**: press Detect once, then plug the phone in and it is picked up the moment it enters BROM
+- 📟 **MediaTek BROM/preloader support** — instant auto-detect, chipset/security readout, **bring-your-own DA** parsing (V3/V5/V6), user-supplied auth/cert upload, `SEND_DA` + `JUMP_DA`/`JUMP_DA64`, raw 32-bit memory read/write
+- 🧩 **No bundled binaries** — you supply the DA and auth files; FlashBridge recognises and uses them
 
 ---
 
@@ -122,11 +123,20 @@ The **MTK tab** detects MediaTek devices in BROM or preloader mode (USB VID `0x0
 
 To enter BROM: power off, hold **Volume Up + Power** (or Volume Down + Power), connect USB, then release. For preloader: power off and just connect USB.
 
-**This is identification only, not an SP Flash Tool replacement.** Writing partitions on MediaTek chips requires MediaTek's proprietary, chipset-matched **Download Agent (DA)** binary. FlashBridge deliberately bundles no binaries and is All Rights Reserved, so it cannot legally ship that DA. Use the MTK tab to confirm the chip and security state, then use the correct vendor tool for the actual flash.
+#### Bring your own DA (v1.6+)
+
+The MTK tab now goes beyond identification:
+
+1. **Choose a DA file** from your own storage. FlashBridge parses the documented 0x6C-byte header and DA entry table: protocol (Legacy V3 / XFlash V5 / XML V6), file ID, version, supported hardware codes, and each stage's offset, load address, size and signature length. It checks the DA against the connected chip's HW code and shows SHA-256.
+2. **Add your own authorization files** if the chip requires BROM SLA or DAA. They are sent with the standard `SEND_AUTH` (0xE2) / `SEND_CERT` (0xE0) commands.
+3. **Upload and jump** — the selected DA stage is sent with `SEND_DA` (0xD7) to its header-specified address, checksummed, then executed with `JUMP_DA` (0xD5) or `JUMP_DA64` (0xDE).
+4. **Raw memory tools** — `READ32` (0xD1) and `WRITE32` (0xD4) for advanced diagnosis once a DA is running.
+
+This is the same first-stage path PC tools use, implemented in pure Kotlin. FlashBridge **bundles no MediaTek binaries** and does **not implement exploit-based security bypasses** (kamakiri, carbonara, heapbait, etc.). Writing/formatting flash partitions is performed by commands inside the DA itself; support for those DA-level commands is not claimed here. Only use DA and auth files you are entitled to, for devices you own, and keep a backup.
 
 ### Limitations
 
-Standard fastboot and ADB devices are supported across vendors. Samsung (Odin/download mode) and Qualcomm 9008 (QFIL) use proprietary protocols that cannot be driven through fastboot/ADB. Bootloader unlock may additionally require OEM unlocking to be enabled, a Mi-account authorization (Xiaomi), or internet access depending on the vendor.
+Standard fastboot and ADB devices are supported across vendors. Samsung (Odin/download mode) and Qualcomm 9008 (QFIL) use proprietary protocols that cannot be driven through fastboot/ADB. MediaTek partition writes need a compatible running DA. Bootloader unlock may additionally require OEM unlocking to be enabled, a Mi-account authorization (Xiaomi), or internet access depending on the vendor.
 
 ---
 

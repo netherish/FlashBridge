@@ -27,7 +27,12 @@ import com.netherish.flashbridge.ui.theme.*
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun FlashBridgeScreen(vm: MainViewModel, onPickFiles: () -> Unit) {
+fun FlashBridgeScreen(
+    vm: MainViewModel,
+    onPickFiles: () -> Unit,
+    onPickDa: () -> Unit,
+    onPickAuth: () -> Unit,
+) {
     val state by vm.state.collectAsState()
     val usbStatus by vm.usbStatus.collectAsState()
     val adbStatus by vm.adbStatus.collectAsState()
@@ -126,12 +131,14 @@ fun FlashBridgeScreen(vm: MainViewModel, onPickFiles: () -> Unit) {
                     1 -> FastbootTab(state, vm, busy) { title, action -> confirm = title to action }
                     2 -> AdbTab(state, vm, busy, shellCmd, { shellCmd = it },
                         pushPath = pushPath, onPushPath = { pushPath = it })
-                    3 -> MtkTab(state, mtkStatus)
+                    3 -> MtkTab(state, mtkStatus, vm, busy, onPickDa, onPickAuth) { title, action ->
+                        confirm = title to action
+                    }
                     4 -> ConsoleTab(state)
                 }
 
                 Text(
-                    "Developed by netherish · v1.5 · All rights reserved",
+                    "Developed by netherish · v1.6 · All rights reserved",
                     color = TextMuted, fontSize = 11.sp,
                     modifier = Modifier.align(Alignment.CenterHorizontally).padding(bottom = 8.dp),
                 )
@@ -488,10 +495,25 @@ private fun AdbTab(
 // ---- MTK tab -------------------------------------------------------------
 
 @Composable
-private fun MtkTab(state: UiState, mtkStatus: MtkState) {
+private fun MtkTab(
+    state: UiState,
+    mtkStatus: MtkState,
+    vm: MainViewModel,
+    busy: Boolean,
+    onPickDa: () -> Unit,
+    onPickAuth: () -> Unit,
+    confirm: (String, () -> Unit) -> Unit,
+) {
     val info = state.mtkInfo
+    val da = state.daFile
+    var entryIndex by remember { mutableIntStateOf(0) }
+    var regionIndex by remember { mutableIntStateOf(0) }
+    var use64 by remember { mutableStateOf(true) }
+    var address by remember { mutableStateOf("") }
+    var count by remember { mutableStateOf("1") }
+    var values by remember { mutableStateOf("") }
 
-    SectionTitle("MediaTek identification")
+    SectionTitle("MediaTek device")
     Card(colors = CardDefaults.cardColors(containerColor = Surface), shape = RoundedCornerShape(14.dp)) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             if (info != null) {
@@ -503,7 +525,7 @@ private fun MtkTab(state: UiState, mtkStatus: MtkState) {
                     "SW version" to "0x%04X".format(info.swVer),
                     "BL version" to if (info.blVer >= 0) "0x%02X".format(info.blVer) else "n/a",
                     "BROM version" to if (info.bromVer >= 0) "0x%02X".format(info.bromVer) else "n/a",
-                    "Mode" to if (info.isBrom) "BROM" else "Preloader",
+                    "Mode" to if (mtkStatus is MtkState.DaRunning) "DA running" else if (info.isBrom) "BROM" else "Preloader",
                     "USB VID/PID" to "0x%04X:0x%04X".format(info.usb.vendorId, info.usb.productId),
                 )
                 rows.forEach { (k, v) ->
@@ -528,6 +550,9 @@ private fun MtkTab(state: UiState, mtkStatus: MtkState) {
                 }
                 Text(msg, color = if (arming) Cyan else TextMuted, fontSize = 12.sp)
             }
+            if (state.mtkProgress.isNotEmpty()) {
+                Text(state.mtkProgress, color = Cyan, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+            }
         }
     }
 
@@ -536,6 +561,136 @@ private fun MtkTab(state: UiState, mtkStatus: MtkState) {
         Card(colors = CardDefaults.cardColors(containerColor = Surface), shape = RoundedCornerShape(14.dp)) {
             Text(info.security, color = Warning, fontFamily = FontFamily.Monospace, fontSize = 11.sp,
                 modifier = Modifier.padding(14.dp))
+        }
+    }
+
+    SectionTitle("1 · Download Agent (you supply it)")
+    Card(colors = CardDefaults.cardColors(containerColor = Surface), shape = RoundedCornerShape(14.dp)) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                "Pick your own chipset-matched DA file. FlashBridge reads its header and recognises the protocol, chipsets and stages — no DA is bundled.",
+                color = TextMuted, fontSize = 11.sp, lineHeight = 15.sp,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SmallButton("Choose DA", Modifier.weight(1f), !busy) { onPickDa() }
+                if (da != null) SmallButton("Clear", Modifier.weight(0.5f), !busy) { vm.clearDa() }
+            }
+            if (da != null) {
+                val match = info?.let { da.supports(it.hwCode) }
+                val rows = listOf(
+                    "File" to da.name,
+                    "Size" to FileUtils.readable(da.size),
+                    "Protocol" to da.protocol.label,
+                    "File ID" to da.fileId,
+                    "Version" to da.version.toString(),
+                    "SoC entries" to da.entries.size.toString(),
+                    "SHA-256" to da.sha256.take(24) + "…",
+                    "Chip match" to when (match) {
+                        null -> "detect a device first"
+                        true -> "✓ matches 0x%04X".format(info!!.hwCode)
+                        false -> "⚠ DA does not list 0x%04X".format(info!!.hwCode)
+                    },
+                )
+                rows.forEach { (k, v) ->
+                    Row(Modifier.fillMaxWidth()) {
+                        Text(k, color = TextMuted, fontSize = 11.sp, modifier = Modifier.weight(1f))
+                        Text(v, color = if (k == "Chip match" && match == false) Error else TextPrimary,
+                            fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                    }
+                }
+                if (da.entries.size > 1) {
+                    Text("SoC entry: $entryIndex · HW 0x%04X".format(da.entries[entryIndex.coerceIn(da.entries.indices)].hwCode),
+                        color = TextMuted, fontSize = 11.sp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        SmallButton("◀", Modifier.weight(1f), entryIndex > 0) { entryIndex-- }
+                        SmallButton("▶", Modifier.weight(1f), entryIndex < da.entries.size - 1) { entryIndex++ }
+                    }
+                }
+                val entry = da.entries[entryIndex.coerceIn(da.entries.indices)]
+                if (entry.regions.isNotEmpty()) {
+                    val region = entry.regions[regionIndex.coerceIn(entry.regions.indices)]
+                    Text(
+                        "Stage ${regionIndex + 1}/${entry.regions.size} · offset 0x%X · load 0x%08X · %s".format(
+                            region.offset, region.address, FileUtils.readable(region.length.toLong())),
+                        color = TextPrimary, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        SmallButton("◀ stage", Modifier.weight(1f), regionIndex > 0) { regionIndex-- }
+                        SmallButton("stage ▶", Modifier.weight(1f), regionIndex < entry.regions.size - 1) { regionIndex++ }
+                    }
+                }
+            }
+        }
+    }
+
+    SectionTitle("2 · Authorization files (you supply them)")
+    Card(colors = CardDefaults.cardColors(containerColor = Surface), shape = RoundedCornerShape(14.dp)) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                "If the chip requires SLA/DAA/certificate authorization, add your own valid auth files. They are sent with the standard BROM auth commands — nothing is bypassed or generated by this app.",
+                color = TextMuted, fontSize = 11.sp, lineHeight = 15.sp,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SmallButton("Add auth files", Modifier.weight(1f), !busy) { onPickAuth() }
+                if (state.authFiles.isNotEmpty()) SmallButton("Clear", Modifier.weight(0.5f), !busy) { vm.clearAuth() }
+            }
+            state.authFiles.forEach { auth ->
+                Row(Modifier.fillMaxWidth()) {
+                    Text("${auth.kind}: ${auth.name}", color = TextPrimary, fontSize = 11.sp,
+                        modifier = Modifier.weight(1f))
+                    Text(auth.sha256.take(10), color = TextMuted, fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace)
+                }
+            }
+            if (state.authFiles.isEmpty()) Text("No auth files added", color = TextMuted, fontSize = 11.sp)
+        }
+    }
+
+    SectionTitle("3 · Boot DA stage")
+    Card(colors = CardDefaults.cardColors(containerColor = SurfaceHigh), shape = RoundedCornerShape(14.dp)) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(checked = use64, onCheckedChange = { use64 = it }, enabled = !busy)
+                Text("64-bit DA (JUMP_DA64)", color = TextPrimary, fontSize = 11.sp)
+            }
+            Button(
+                onClick = {
+                    confirm("Upload and execute this DA stage on the connected device?") {
+                        vm.bootDa(entryIndex, regionIndex, use64)
+                    }
+                },
+                modifier = Modifier.fillMaxWidth().height(46.dp),
+                enabled = info != null && da != null && da.entries.isNotEmpty() && !busy,
+                colors = ButtonDefaults.buttonColors(containerColor = Cyan, contentColor = Color(0xFF00363D),
+                    disabledContainerColor = Surface, disabledContentColor = TextMuted),
+                shape = RoundedCornerShape(12.dp),
+            ) {
+                Icon(Icons.Filled.Memory, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("UPLOAD + JUMP DA", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            }
+            Text(
+                "This runs the DA you chose on your device. Wrong DA or auth files can hard-brick it. Continue only with files for your exact chipset.",
+                color = Warning, fontSize = 11.sp, lineHeight = 15.sp,
+            )
+        }
+    }
+
+    SectionTitle("4 · Raw memory access (advanced)")
+    Card(colors = CardDefaults.cardColors(containerColor = Surface), shape = RoundedCornerShape(14.dp)) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(address, { address = it }, label = { Text("Address (hex)") },
+                singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(count, { count = it }, label = { Text("Word count") },
+                singleLine = true, modifier = Modifier.fillMaxWidth())
+            SmallButton("Read 32-bit", Modifier.fillMaxWidth(), info != null && !busy) {
+                vm.mtkRead32(address, count)
+            }
+            OutlinedTextField(values, { values = it }, label = { Text("Values (hex, space separated)") },
+                modifier = Modifier.fillMaxWidth())
+            SmallButton("Write 32-bit", Modifier.fillMaxWidth(), info != null && !busy) {
+                vm.mtkWrite32(address, values)
+            }
         }
     }
 
@@ -556,9 +711,9 @@ private fun MtkTab(state: UiState, mtkStatus: MtkState) {
             Text("⛔", fontSize = 16.sp)
             Spacer(Modifier.width(8.dp))
             Text(
-                "Identification only. Writing partitions on MediaTek chips requires MediaTek's proprietary, chipset-matched Download Agent binary. " +
-                    "FlashBridge deliberately bundles no binaries, so it cannot replace SP Flash Tool for flashing. " +
-                    "Use this tab to verify the device, chipset and security flags before choosing the correct tools.",
+                "Bring your own DA and authorization files. FlashBridge recognises them and drives the standard upload/jump path in pure Kotlin. " +
+                    "It does not bundle MediaTek binaries and does not implement exploit-based security bypasses. " +
+                    "Partition-level flashing (write/format) is only possible once a compatible DA is running; always verify the chip match and keep backups.",
                 color = Warning, fontSize = 11.sp, lineHeight = 15.sp,
             )
         }

@@ -22,6 +22,14 @@ class MainActivity : ComponentActivity() {
         if (!uris.isNullOrEmpty()) vm.addFiles(uris)
     }
 
+    private val daPicker = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) vm.loadDa(uri)
+    }
+
+    private val authPicker = registerForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
+        if (!uris.isNullOrEmpty()) vm.loadAuth(uris)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -33,6 +41,8 @@ class MainActivity : ComponentActivity() {
                     FlashBridgeScreen(
                         vm = vm,
                         onPickFiles = { filePicker.launch("*/*") },
+                        onPickDa = { daPicker.launch("*/*") },
+                        onPickAuth = { authPicker.launch("*/*") },
                     )
                 }
             }
