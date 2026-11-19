@@ -205,7 +205,7 @@ fun FlashBridgeScreen(vm: MainViewModel, onPickFile: () -> Unit) {
                 )
             }
 
-            Text("Developed by netherish · v1.1", color = TextMuted, fontSize = 11.sp,
+            Text("Developed by netherish · v1.2", color = TextMuted, fontSize = 11.sp,
                 modifier = Modifier.align(Alignment.CenterHorizontally).padding(bottom = 16.dp))
         }
     }

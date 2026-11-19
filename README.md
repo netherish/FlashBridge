@@ -8,7 +8,7 @@
 ![Platform](https://img.shields.io/badge/Platform-Android-3DDC84?logo=android&logoColor=white)
 ![Status](https://img.shields.io/badge/Status-working-brightgreen)
 
-[⬇️ **Download FlashBridge APK (v1.1)**](https://github.com/netherish/FlashBridge/releases/download/v1.1/flashbridge.apk)
+[⬇️ **Download FlashBridge APK (v1.2)**](https://github.com/netherish/FlashBridge/releases/download/v1.2/flashbridge.apk)
 
 </div>
 
@@ -16,7 +16,7 @@
 
 ## Download
 
-**[Download the latest APK (v1.1)](https://github.com/netherish/FlashBridge/releases/download/v1.1/flashbridge.apk)** — 12.4 MB · Android 8.0+ · no root required
+**[Download the latest APK (v1.2)](https://github.com/netherish/FlashBridge/releases/download/v1.2/flashbridge.apk)** — 12.4 MB · Android 8.0+ · no root required
 
 Or browse [all releases](https://github.com/netherish/FlashBridge/releases).
 
@@ -71,7 +71,7 @@ Android's USB Host API lets an app claim a connected USB device's bulk endpoints
 
 Press **Detect device**. FlashBridge scans USB devices:
 
-1. **Fastboot device** (e.g. Google `0x18D1:0xD00D`) → connects directly; flash actions unlock.
+1. **Fastboot device** — detected by the standard USB fastboot interface (`0xFF/0x42/0x03`), so it works across vendors; flash actions unlock.
 2. **ADB device** (USB class `0xFF` / subclass `0x42` / protocol `0x01`) → performs a full ADB handshake:
    - Sends `CNXN`, handles `AUTH` tokens by signing with a locally generated 2048-bit RSA key (AOSP-compatible `RSAPublicKey` blob), so the standard "Allow USB debugging?" prompt appears on the target.
    - Once authenticated, reads `getprop ro.product.model` / `getprop ro.product.device`.

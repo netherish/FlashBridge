@@ -97,8 +97,16 @@ class FastbootUsb(private val context: Context) {
             val conn = usbManager.openDevice(device) ?: throw IOException("openDevice returned null")
             var foundOut: UsbEndpoint? = null
             var foundIn: UsbEndpoint? = null
-            for (i in 0 until device.interfaceCount) {
-                val intf = device.getInterface(i)
+            // Prefer the standard fastboot interface (0xFF/0x42/0x03) over any
+            // other bulk interface the device might expose.
+            val interfaces = (0 until device.interfaceCount)
+                .map { device.getInterface(it) }
+                .sortedByDescending { intf ->
+                    if (intf.interfaceClass == 0xFF &&
+                        intf.interfaceSubclass == 0x42 &&
+                        intf.interfaceProtocol == 0x03) 1 else 0
+                }
+            for (intf in interfaces) {
                 for (e in 0 until intf.endpointCount) {
                     val ep = intf.getEndpoint(e)
                     if (ep.type != UsbConstants.USB_ENDPOINT_XFER_BULK) continue
@@ -231,6 +239,19 @@ class FastbootUsb(private val context: Context) {
         const val ACTION_USB_PERMISSION = "com.netherish.flashbridge.USB_PERMISSION"
 
         fun isFastboot(device: UsbDevice): Boolean {
+            // Standard fastboot interface: vendor-specific class 0xFF,
+            // subclass 0x42, protocol 0x03 (ADB uses protocol 0x01).
+            // This works for virtually every standard fastboot device
+            // regardless of vendor ID.
+            for (i in 0 until device.interfaceCount) {
+                val intf = device.getInterface(i)
+                if (intf.interfaceClass == 0xFF &&
+                    intf.interfaceSubclass == 0x42 &&
+                    intf.interfaceProtocol == 0x03) {
+                    return true
+                }
+            }
+            // Fallback for devices with non-standard interface descriptors
             val v = device.vendorId
             val p = device.productId
             return (v == 0x18D1 && (p == 0xD00D || p == 0x4E20)) ||
