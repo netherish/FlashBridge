@@ -1,40 +1,45 @@
-# F-Droid metadata template.
-# Copy this file to fdroiddata/metadata/com.netherish.flashbridge.yml when
-# submitting. The `commit` must point to a real tag (create `v1.8` first).
+# F-Droid metadata template for the official fdroiddata repository.
+# Copy to fdroiddata/metadata/com.netherish.flashbridge.yml and open the merge
+# request against https://gitlab.com/fdroid/fdroiddata.
+#
+# The `commit` below must be the full 40-character commit hash of the release
+# that contains the fastlane metadata under fastlane/metadata/android/en-US/.
+# Tag names are not accepted by F-Droid for new builds.
 
 Categories:
-  - System
   - Development
+  - System
 License: MIT
 AuthorName: netherish
 SourceCode: https://github.com/netherish/FlashBridge
 IssueTracker: https://github.com/netherish/FlashBridge/issues
 Changelog: https://github.com/netherish/FlashBridge/releases
-Repo: https://github.com/netherish/FlashBridge
+Repo: https://github.com/netherish/FlashBridge.git
 RepoType: git
 
-Description: |
-  FlashBridge turns an Android phone with OTG support into a firmware utility
-  for devices you own or are authorised to modify. It implements the fastboot
-  and ADB protocols directly in Kotlin over the Android USB Host API.
+# Name, summary, full description, changelog and screenshots come from the
+# source repository under fastlane/metadata/android/en-US/, so no Name,
+# Summary or Description fields are set here.
 
-  Features include a multi-image flash queue with per-partition targets and
-  SHA-256 checksums, temporary boot, getvar all, A/B slot switching, factory
-  reset, sideload and push, shell access, reboot targets, and an Advanced mode
-  for erase/format/wipe/unlock/raw commands.
+MaintainerNotes: |
+  This is a fastboot/ADB firmware utility for devices the user owns or is
+  authorised to modify. It requires no root and bundles no binaries or
+  firmware. Destructive operations are gated behind an in-app Advanced switch
+  and always show an exact-operation confirmation dialog.
 
-  No root, no bundled binaries, no bundled firmware and no vendor exploits.
-  Every destructive action shows an exact-operation confirmation. Standard
-  and advanced operations are clearly separated.
+  The `full` flavor is the F-Droid build. The `play` flavor is a restricted
+  variant with advanced operations compiled out and is not needed here.
+
+  Name, summary, full description, changelog and screenshots are supplied in
+  the source repository under fastlane/metadata/android/en-US/.
 
 Builds:
-  - versionName: 1.8
+  - versionName: '1.8'
     versionCode: 9
-    commit: v1.8
+    commit: 98a05f93c4e8d34f1f7931b8f8973ad34bcb4a78
     gradle:
-      - assembleFullRelease
+      - full
     output: app/build/outputs/apk/full/release/app-full-release-unsigned.apk
-    timeout: 30min
 
 AutoUpdateMode: Version
 UpdateCheckMode: Tags
