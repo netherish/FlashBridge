@@ -21,6 +21,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.netherish.flashbridge.core.AdbState
 import com.netherish.flashbridge.core.FileUtils
+import com.netherish.flashbridge.core.MtkState
 import com.netherish.flashbridge.core.UsbState
 import com.netherish.flashbridge.ui.theme.*
 
@@ -30,6 +31,7 @@ fun FlashBridgeScreen(vm: MainViewModel, onPickFiles: () -> Unit) {
     val state by vm.state.collectAsState()
     val usbStatus by vm.usbStatus.collectAsState()
     val adbStatus by vm.adbStatus.collectAsState()
+    val mtkStatus by vm.mtkStatus.collectAsState()
 
     var tab by remember { mutableIntStateOf(0) }
     var confirm by remember { mutableStateOf<Pair<String, () -> Unit>?>(null) }
@@ -73,7 +75,11 @@ fun FlashBridgeScreen(vm: MainViewModel, onPickFiles: () -> Unit) {
                     mode = state.deviceMode,
                     usbStatus = usbStatus,
                     adbStatus = adbStatus,
-                    info = state.adbModel.ifEmpty { state.deviceInfo.lines().firstOrNull() ?: "" },
+                    info = when (state.deviceMode) {
+                        DeviceMode.MTK -> state.mtkInfo?.chipName ?: ""
+                        else -> state.adbModel.ifEmpty { state.deviceInfo.lines().firstOrNull() ?: "" }
+                    },
+                    mtkStatus = mtkStatus,
                 )
 
                 Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF3A2A00)), shape = RoundedCornerShape(14.dp)) {
@@ -104,7 +110,7 @@ fun FlashBridgeScreen(vm: MainViewModel, onPickFiles: () -> Unit) {
                     contentColor = Cyan,
                     divider = { HorizontalDivider(color = SurfaceHigh) },
                 ) {
-                    listOf("Flash", "Fastboot", "ADB", "Console").forEachIndexed { i, title ->
+                    listOf("Flash", "Fastboot", "ADB", "MTK", "Console").forEachIndexed { i, title ->
                         Tab(
                             selected = tab == i,
                             onClick = { tab = i },
@@ -120,11 +126,12 @@ fun FlashBridgeScreen(vm: MainViewModel, onPickFiles: () -> Unit) {
                     1 -> FastbootTab(state, vm, busy) { title, action -> confirm = title to action }
                     2 -> AdbTab(state, vm, busy, shellCmd, { shellCmd = it },
                         pushPath = pushPath, onPushPath = { pushPath = it })
-                    3 -> ConsoleTab(state)
+                    3 -> MtkTab(state, mtkStatus)
+                    4 -> ConsoleTab(state)
                 }
 
                 Text(
-                    "Developed by netherish · v1.3 · All rights reserved",
+                    "Developed by netherish · v1.4 · All rights reserved",
                     color = TextMuted, fontSize = 11.sp,
                     modifier = Modifier.align(Alignment.CenterHorizontally).padding(bottom = 8.dp),
                 )
@@ -426,6 +433,79 @@ private fun AdbTab(
     }
 }
 
+// ---- MTK tab -------------------------------------------------------------
+
+@Composable
+private fun MtkTab(state: UiState, mtkStatus: MtkState) {
+    val info = state.mtkInfo
+
+    SectionTitle("MediaTek identification")
+    Card(colors = CardDefaults.cardColors(containerColor = Surface), shape = RoundedCornerShape(14.dp)) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            if (info != null) {
+                val rows = listOf(
+                    "Chipset" to info.chipName,
+                    "HW code" to "0x%04X".format(info.hwCode),
+                    "HW version" to "0x%04X".format(info.hwVer),
+                    "HW subcode" to "0x%04X".format(info.hwSubCode),
+                    "SW version" to "0x%04X".format(info.swVer),
+                    "BL version" to if (info.blVer >= 0) "0x%02X".format(info.blVer) else "n/a",
+                    "BROM version" to if (info.bromVer >= 0) "0x%02X".format(info.bromVer) else "n/a",
+                    "Mode" to if (info.isBrom) "BROM" else "Preloader",
+                    "USB VID/PID" to "0x%04X:0x%04X".format(info.usb.vendorId, info.usb.productId),
+                )
+                rows.forEach { (k, v) ->
+                    Row(Modifier.fillMaxWidth()) {
+                        Text(k, color = TextMuted, fontSize = 11.sp, modifier = Modifier.weight(1f))
+                        Text(v, color = TextPrimary, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                    }
+                }
+            } else {
+                val msg = when (mtkStatus) {
+                    is MtkState.NoDevice -> mtkStatus.message
+                    is MtkState.Error -> mtkStatus.message
+                    is MtkState.NeedPermission -> "Approve USB permission, then Detect again"
+                    else -> "Power off the phone, hold Volume Up or Volume Down, then connect USB. Press Detect."
+                }
+                Text(msg, color = TextMuted, fontSize = 12.sp)
+            }
+        }
+    }
+
+    if (info != null) {
+        SectionTitle("Security configuration")
+        Card(colors = CardDefaults.cardColors(containerColor = Surface), shape = RoundedCornerShape(14.dp)) {
+            Text(info.security, color = Warning, fontFamily = FontFamily.Monospace, fontSize = 11.sp,
+                modifier = Modifier.padding(14.dp))
+        }
+    }
+
+    SectionTitle("Enter MediaTek download mode")
+    Card(colors = CardDefaults.cardColors(containerColor = SurfaceHigh), shape = RoundedCornerShape(14.dp)) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("• BROM: power off, hold Volume Up + Power (or Volume Down + Power), connect USB, then release.",
+                color = TextPrimary, fontSize = 11.sp)
+            Text("• Preloader: power off, connect USB with no buttons held.",
+                color = TextPrimary, fontSize = 11.sp)
+            Text("• If the port disconnects after a few seconds, hold the button through the whole Detect step.",
+                color = TextMuted, fontSize = 11.sp)
+        }
+    }
+
+    Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF3A2A00)), shape = RoundedCornerShape(14.dp)) {
+        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.Top) {
+            Text("⛔", fontSize = 16.sp)
+            Spacer(Modifier.width(8.dp))
+            Text(
+                "Identification only. Writing partitions on MediaTek chips requires MediaTek's proprietary, chipset-matched Download Agent binary. " +
+                    "FlashBridge deliberately bundles no binaries, so it cannot replace SP Flash Tool for flashing. " +
+                    "Use this tab to verify the device, chipset and security flags before choosing the correct tools.",
+                color = Warning, fontSize = 11.sp, lineHeight = 15.sp,
+            )
+        }
+    }
+}
+
 // ---- Console tab ---------------------------------------------------------
 
 @Composable
@@ -451,16 +531,25 @@ private fun ConsoleTab(state: UiState) {
 // ---- Shared composables --------------------------------------------------
 
 @Composable
-private fun StatusCard(mode: DeviceMode, usbStatus: UsbState, adbStatus: AdbState, info: String) {
+private fun StatusCard(
+    mode: DeviceMode,
+    usbStatus: UsbState,
+    adbStatus: AdbState,
+    mtkStatus: MtkState,
+    info: String,
+) {
     val (color, title) = when (mode) {
         DeviceMode.FASTBOOT -> Success to "Fastboot connected ✓"
         DeviceMode.ADB -> Cyan to "ADB connected ✓"
         DeviceMode.RECOVERY -> Amber to "Recovery / sideload ✓"
+        DeviceMode.MTK -> Amber to "MediaTek device identified ✓"
         DeviceMode.NONE -> {
             val problem = when {
                 adbStatus is AdbState.NeedPermission || usbStatus is UsbState.NeedPermission -> "Approve the USB prompt"
                 adbStatus is AdbState.Error -> adbStatus.message
                 usbStatus is UsbState.Error -> usbStatus.message
+                mtkStatus is MtkState.Error -> mtkStatus.message
+                mtkStatus is MtkState.NeedPermission -> "Approve the MTK USB prompt"
                 adbStatus is AdbState.NoDevice && usbStatus is UsbState.NoDevice ->
                     "No ADB/fastboot device — check OTG cable and mode"
                 else -> "Press Detect to scan for devices"

@@ -8,7 +8,7 @@
 ![Platform](https://img.shields.io/badge/Platform-Android-3DDC84?logo=android&logoColor=white)
 ![Status](https://img.shields.io/badge/Status-working-brightgreen)
 
-[⬇️ **Download FlashBridge APK (v1.3 Advanced)**](https://github.com/netherish/FlashBridge/releases/download/v1.3/flashbridge.apk)
+[⬇️ **Download FlashBridge APK (v1.4)**](https://github.com/netherish/FlashBridge/releases/download/v1.4/flashbridge.apk)
 
 </div>
 
@@ -16,7 +16,7 @@
 
 ## Download
 
-**[Download the latest APK (v1.3 Advanced)](https://github.com/netherish/FlashBridge/releases/download/v1.3/flashbridge.apk)** — Android 8.0+ · no root required
+**[Download the latest APK (v1.4)](https://github.com/netherish/FlashBridge/releases/download/v1.4/flashbridge.apk)** — Android 8.0+ · no root required
 
 Or browse [all releases](https://github.com/netherish/FlashBridge/releases).
 
@@ -62,7 +62,8 @@ It speaks the **fastboot** and **ADB** protocols directly over Android's USB Hos
 - 🔓 **No root, no binaries** — pure Kotlin implementation using the Android USB Host API
 - 🌐 Universal fastboot detection by USB interface class — works across vendors
 - 📊 Live transfer progress, device info panel, and full session log
-- 🎨 Tabbed Material 3 advanced interface (Flash / Fastboot / ADB / Console)
+- 🎨 Tabbed Material 3 advanced interface (Flash / Fastboot / ADB / MTK / Console)
+- 📟 **MediaTek identification** — BROM/preloader handshake, chipset + security flag readout on the MTK tab
 
 ---
 
@@ -107,9 +108,22 @@ This is the same protocol `fastboot` on a PC uses — implemented natively in Ko
 
 Boot the target into custom recovery, choose **Apply update → Apply from ADB**, connect, press Detect, then **Sideload ZIP** on the Flash or ADB tab. The ZIP is streamed over the ADB `sideload:` service with live progress — exactly like `adb sideload` on a PC.
 
+### MediaTek (MTK) devices
+
+The **MTK tab** detects MediaTek devices in BROM or preloader mode (USB VID `0x0E8D`), performs the first-stage handshake, and reads:
+
+- HW code / HW version / HW subcode / SW version
+- Bootloader and BROM versions
+- Chipset name (MT6735, MT6765 Helio P35, Dimensity, …)
+- Target security config — SBC, SLA, DAA, certificate and auth flags
+
+To enter BROM: power off, hold **Volume Up + Power** (or Volume Down + Power), connect USB, then release. For preloader: power off and just connect USB.
+
+**This is identification only, not an SP Flash Tool replacement.** Writing partitions on MediaTek chips requires MediaTek's proprietary, chipset-matched **Download Agent (DA)** binary. FlashBridge deliberately bundles no binaries and is All Rights Reserved, so it cannot legally ship that DA. Use the MTK tab to confirm the chip and security state, then use the correct vendor tool for the actual flash.
+
 ### Limitations
 
-Standard fastboot and ADB devices are supported across vendors. Samsung (Odin/download mode), MediaTek (SP Flash Tool) and Qualcomm 9008 (QFIL) use proprietary protocols that cannot be driven through fastboot/ADB. Bootloader unlock may additionally require OEM unlocking to be enabled, a Mi-account authorization (Xiaomi), or internet access depending on the vendor.
+Standard fastboot and ADB devices are supported across vendors. Samsung (Odin/download mode) and Qualcomm 9008 (QFIL) use proprietary protocols that cannot be driven through fastboot/ADB. Bootloader unlock may additionally require OEM unlocking to be enabled, a Mi-account authorization (Xiaomi), or internet access depending on the vendor.
 
 ---
 

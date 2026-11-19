@@ -8,6 +8,9 @@ import com.netherish.flashbridge.core.AdbState
 import com.netherish.flashbridge.core.AdbUsb
 import com.netherish.flashbridge.core.FastbootUsb
 import com.netherish.flashbridge.core.FileUtils
+import com.netherish.flashbridge.core.MtkInfo
+import com.netherish.flashbridge.core.MtkState
+import com.netherish.flashbridge.core.MtkUsb
 import com.netherish.flashbridge.core.UsbInfo
 import com.netherish.flashbridge.core.UsbState
 import kotlinx.coroutines.Dispatchers
@@ -17,7 +20,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 enum class Busy { None, Running }
-enum class DeviceMode { NONE, FASTBOOT, ADB, RECOVERY }
+enum class DeviceMode { NONE, FASTBOOT, ADB, RECOVERY, MTK }
 
 data class FlashItem(
     val id: Long,
@@ -37,6 +40,7 @@ data class UiState(
     val terminal: String = "",
     val progress: String = "",
     val lastResultOk: Boolean? = null,
+    val mtkInfo: MtkInfo? = null,
     val queue: List<FlashItem> = emptyList(),
     val defaultPartition: String = "boot",
     val selectedFile: String = "",
@@ -47,11 +51,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val fastboot = FastbootUsb(app)
     private val adb = AdbUsb(app)
+    private val mtk = MtkUsb(app)
 
     val usbStatus: StateFlow<UsbState> = fastboot.status
     val adbStatus: StateFlow<AdbState> = adb.status
+    val mtkStatus: StateFlow<MtkState> = mtk.status
     val usbDevice: StateFlow<UsbInfo?> = fastboot.deviceInfo
     val adbDevice: StateFlow<UsbInfo?> = adb.deviceInfo
+    val mtkInfo: StateFlow<MtkInfo?> = mtk.info
 
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state
@@ -78,6 +85,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
         }
+        viewModelScope.launch {
+            mtk.status.collect { st ->
+                when (st) {
+                    is MtkState.Connected -> {
+                        val i = st.info
+                        _state.value = _state.value.copy(
+                            deviceMode = DeviceMode.MTK,
+                            mtkInfo = i,
+                        )
+                        append("✓ MediaTek device: ${i.chipName}")
+                        append("HW code 0x%04X · HW ver 0x%04X · BROM ${i.bromVer}".format(i.hwCode, i.hwVer))
+                    }
+                    is MtkState.NeedPermission -> append("Approve the USB permission prompt for the MTK device")
+                    is MtkState.Error -> append("⚠ MTK: ${st.message}")
+                    else -> {}
+                }
+            }
+        }
     }
 
     // ---- Discovery -------------------------------------------------------
@@ -86,16 +111,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         append("Scanning USB…")
         fastboot.close()
         adb.close()
+        mtk.close()
         _state.value = _state.value.copy(
             deviceMode = DeviceMode.NONE,
             adbModel = "",
             deviceInfo = "",
+            mtkInfo = null,
         )
 
         fastboot.scan()
         when (fastboot.status.value) {
             is UsbState.NeedPermission, is UsbState.Connected -> return
             else -> adb.scan()
+        }
+        when (adb.status.value) {
+            is AdbState.NeedPermission, is AdbState.Connected -> return
+            else -> mtk.scan()
         }
     }
 
@@ -362,5 +393,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         super.onCleared()
         fastboot.dispose()
         adb.dispose()
+        mtk.dispose()
     }
 }
