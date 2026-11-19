@@ -14,13 +14,13 @@ import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.util.Base64
+import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.io.IOException
 import java.io.InputStream
-import java.math.BigInteger
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.KeyFactory
@@ -198,33 +198,50 @@ class AdbUsb(private val context: Context) {
     private fun handshake() {
         val identity = "host::\u0000".toByteArray(Charsets.US_ASCII)
         sendPacket(AdbPacket(A_CNXN, ADB_VERSION, ADB_MAXDATA, identity))
+        Log.d(TAG, "handshake: sent CNXN, awaiting reply")
 
         var reply = readPacket(8000)
         var attempt = 0
         while (reply.command == A_AUTH && reply.arg0 == AUTH_TOKEN && attempt < 3) {
             attempt++
+            Log.d(TAG, "handshake: AUTH token attempt=$attempt tokenLen=${reply.data.size}")
             if (attempt == 1) {
                 val sig = signToken(reply.data)
-                if (sig != null) sendPacket(AdbPacket(A_AUTH, AUTH_SIGNATURE, 0, sig))
-                else sendPublicKey()
+                if (sig != null) {
+                    Log.d(TAG, "handshake: sending signature len=${sig.size}")
+                    sendPacket(AdbPacket(A_AUTH, AUTH_SIGNATURE, 0, sig))
+                } else {
+                    Log.w(TAG, "handshake: signing failed, sending public key early")
+                    sendPublicKey()
+                }
             } else {
-                // Device rejected signature — trigger the "Allow USB debugging?" prompt.
+                // Device rejected signature — send the public key so the
+                // standard "Allow USB debugging?" prompt appears on the target.
+                Log.d(TAG, "handshake: sending public key (attempt=$attempt)")
                 sendPublicKey()
             }
             reply = readPacket(if (attempt >= 2) 20000 else 8000)
+            Log.d(TAG, "handshake: reply cmd=${cmdName(reply.command)} arg0=${reply.arg0} len=${reply.data.size}")
         }
         if (reply.command != A_CNXN) {
+            Log.e(TAG, "handshake: auth failed cmd=${cmdName(reply.command)} arg0=${reply.arg0}")
             throw IOException("ADB auth failed: ${cmdName(reply.command)}")
         }
+        Log.d(TAG, "handshake: authorized")
         maxData = reply.arg1.takeIf { it in 4096..(1024 * 1024) } ?: 4096
     }
 
+    /**
+     * AOSP sends the public key as a base64-encoded, NUL-terminated string
+     * ("<base64> user@host"), not the raw 524-byte binary blob. adbd reads the
+     * payload as a C string and the framework parses/decodes it to show the
+     * "Allow USB debugging?" prompt. Sending raw bytes made the prompt never
+     * appear.
+     */
     private fun sendPublicKey() {
-        val pub = publicKeyBlob()
-        val withNull = ByteArray(pub.size + 1)
-        System.arraycopy(pub, 0, withNull, 0, pub.size)
-        withNull[pub.size] = 0
-        sendPacket(AdbPacket(A_AUTH, AUTH_RSAPUBLICKEY, 0, withNull))
+        val payload = AdbKeyFormat.publicKeyPayload(publicKeyBlob())
+        Log.d(TAG, "sendPublicKey: payload=${payload.size}")
+        sendPacket(AdbPacket(A_AUTH, AUTH_RSAPUBLICKEY, 0, payload))
     }
 
     // ------------------------------------------------------------------
@@ -521,34 +538,11 @@ class AdbUsb(private val context: Context) {
     }
 
     /** Build ADB's custom 524-byte RSAPublicKey blob from our RSA key. */
-    private fun publicKeyBlob(): ByteArray {
-        val pub = getOrCreateKeyPair().public as java.security.interfaces.RSAPublicKey
-        val n = pub.modulus
-        val e = pub.publicExponent.toInt()
-        val r32 = BigInteger.ONE.shiftLeft(32)
-        val n0inv = r32.subtract(n.mod(r32).modInverse(r32)).mod(r32).toInt()
-        val rr = BigInteger.ONE.shiftLeft(MODULUS_BITS * 2).mod(n)
-        val buf = ByteBuffer.allocate(524).order(ByteOrder.LITTLE_ENDIAN)
-        buf.putInt(MODULUS_WORDS)
-        buf.putInt(n0inv)
-        buf.put(toLE(n, MODULUS_SIZE))
-        buf.put(toLE(rr, MODULUS_SIZE))
-        buf.putInt(e)
-        return buf.array()
-    }
-
-    private fun toLE(value: BigInteger, size: Int): ByteArray {
-        var be = value.toByteArray()
-        var start = 0
-        while (start < be.size - 1 && be[start] == 0.toByte()) start++
-        be = be.copyOfRange(start, be.size)
-        val out = ByteArray(size)
-        val copyLen = minOf(size, be.size)
-        for (i in 0 until copyLen) out[i] = be[be.size - 1 - i]
-        return out
-    }
+    private fun publicKeyBlob(): ByteArray =
+        AdbKeyFormat.encodePublicKey(getOrCreateKeyPair().public as java.security.interfaces.RSAPublicKey)
 
     companion object {
+        private const val TAG = "FlashBridgeADB"
         const val ACTION_USB_PERMISSION = "com.netherish.flashbridge.USB_PERMISSION_ADB"
         private const val MAX_SHELL_PACKETS = 4096
 
@@ -566,10 +560,6 @@ class AdbUsb(private val context: Context) {
 
         private const val ADB_VERSION = 0x01000000
         private const val ADB_MAXDATA = 4096
-
-        private const val MODULUS_SIZE = 256
-        private const val MODULUS_BITS = 2048
-        private const val MODULUS_WORDS = MODULUS_SIZE / 4
 
         private val SHA1_PREFIX = byteArrayOf(
             0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05, 0x00, 0x04, 0x14
