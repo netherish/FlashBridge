@@ -1,0 +1,8 @@
+Final stable release.
+
+- Removed MTK BROM/DA/preloader support entirely: code, UI, tests, docs and screenshots.
+- USB detection runs off the main thread with a duplicate-scan guard.
+- Transfer progress uses a real numeric percentage instead of parsed text.
+- Confirmation dialogs show the exact operation and target device.
+- Added animated tab/scroll/dialog blur transitions.
+- Relicensed under MIT.

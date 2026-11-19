@@ -1,0 +1,1 @@
+Fastboot and ADB firmware tools over USB Host, no root or binaries

@@ -1,0 +1,38 @@
+FlashBridge turns an Android phone with OTG support into a firmware utility for devices you own or are authorised to modify. It speaks the fastboot and ADB protocols directly over the Android USB Host API, in pure Kotlin.
+
+<i>Works unrooted. No bundled binaries, no bundled firmware, no vendor exploits, no root shell.</i>
+
+<b>Flash tab</b>
+- Multi-image queue with an independent partition target for each file
+- SHA-256 checksum for every queued image
+- Live transfer progress during flash and boot
+- Temporary boot without permanently flashing
+
+<b>Fastboot tab</b>
+- Device detection, getvar all, OEM info and variable reads
+- Reboot to bootloader, recovery, fastboot and system
+- Set active A/B slot, unlock and lock bootloader
+- Erase, format and wipe partitions (advanced mode)
+- Raw fastboot OEM commands (advanced mode)
+
+<b>ADB tab</b>
+- Device detection with on-device RSA authentication, so the standard "Allow USB debugging?" prompt appears
+- Remote shell, sideload, push files and reboot targets
+- Reads the device model and presents it in confirmation dialogs
+
+<b>Console</b>
+- Scrollable session log with every command and reply
+
+<b>Safety</b>
+- Every destructive action opens a confirmation dialog showing the exact operation and target device
+- Advanced and experimental operations are hidden behind an in-app switch, and are compiled out of the restricted build flavor
+- The ADB host private key is stored in encrypted preferences and is excluded from backup and device-to-device transfer
+- Standard and advanced operations are clearly separated
+
+<b>Limitations</b>
+Standard fastboot and ADB devices are supported across vendors. Samsung Odin/download mode, Qualcomm 9008 and MediaTek BROM/preloader use proprietary protocols and are not supported. Bootloader unlock may additionally require OEM unlocking to be enabled, vendor authorisation or internet access.
+
+<b>Verification</b>
+The app is installed and launched on an unrooted device, and builds are tested across four variants. No vendor-provided binary or firmware is distributed; you supply every image yourself.
+
+Developed by netherish. MIT licensed.
