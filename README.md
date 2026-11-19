@@ -2,13 +2,13 @@
 
 # FlashBridge
 
-### Your phone is the flashing station. Flash any device, anywhere — no PC, no root.
+### Use an Android phone as a firmware flashing station
 
 [![Author](https://img.shields.io/badge/By-netherish-blueviolet)](https://github.com/netherish)
 ![Platform](https://img.shields.io/badge/Platform-Android-3DDC84?logo=android&logoColor=white)
-![Status](https://img.shields.io/badge/Status-working-brightgreen)
+![License](https://img.shields.io/badge/License-MIT-blue)
 
-[⬇️ **Download FlashBridge APK (v1.6)**](https://github.com/netherish/FlashBridge/releases/download/v1.6/flashbridge.apk)
+[Download FlashBridge v1.8 (APK)](https://github.com/netherish/FlashBridge/releases/download/v1.8/FlashBridge-v1.8-full.apk)
 
 </div>
 
@@ -16,33 +16,27 @@
 
 ## Download
 
-**[Download the latest APK (v1.6)](https://github.com/netherish/FlashBridge/releases/download/v1.6/flashbridge.apk)** — Android 8.0+ · no root required
+**[Download the latest APK (v1.8)](https://github.com/netherish/FlashBridge/releases/download/v1.8/FlashBridge-v1.8-full.apk)** — Android 8.0+, no root required.
 
-Or browse [all releases](https://github.com/netherish/FlashBridge/releases).
-
-Before installing, check the [compatibility reports](docs/TESTED_DEVICES.md) and the [security policy](SECURITY.md).
+Or browse [all releases](https://github.com/netherish/FlashBridge/releases). Before installing, review the [compatibility reports](docs/TESTED_DEVICES.md) and the [security policy](SECURITY.md).
 
 ---
 
 ## What is FlashBridge?
 
-**FlashBridge** turns one Android phone into a complete flashing workstation. Connect a second device over an **OTG cable** and flash custom ROMs, recoveries, kernels, and firmware images directly from the host phone — no computer and no root required.
+FlashBridge turns one Android phone into a firmware flashing workstation. Connect a second device over an OTG cable and flash custom ROMs, recoveries, kernels and firmware images directly from the host phone, without a PC or root access.
 
-It speaks the **fastboot** and **ADB** protocols directly over Android's USB Host API (`UsbManager` + bulk USB transfers), so it works on any normal, unrooted Android 8.0+ phone with OTG support.
+It implements the fastboot and ADB protocols directly on top of Android's USB Host API (`UsbManager` and bulk USB transfers), so it runs on any unrooted Android 8.0+ device with OTG support.
 
 ```
-┌─────────────────┐   OTG cable    ┌──────────────────────┐
-│  HOST PHONE     │───────────────▶│  TARGET PHONE        │
-│  FlashBridge    │  fastboot/ADB  │  ADB or fastboot mode│
-│  (no root)      │  bulk USB      │                      │
-└─────────────────┘                └──────────────────────┘
+Host phone (FlashBridge, unrooted) -- OTG cable / bulk USB --> Target phone (fastboot or ADB mode)
 ```
 
 ---
 
 ## Screenshots
 
-Real UI captures from the v1.8 build on an unrooted Android phone.
+Captures from the v1.8 build on an unrooted Android phone.
 
 | Flash queue | Fastboot tools | ADB tools |
 |:---:|:---:|:---:|
@@ -56,31 +50,36 @@ Real UI captures from the v1.8 build on an unrooted Android phone.
 
 ## Features
 
-### Advanced Flash tab
-- 📦 **Multi-image queue** — add multiple files at once, set each partition independently, flash the whole queue in one run
-- 🔐 **SHA-256 checksum** computed for every queued image
-- 🧩 **Any partition** — boot, recovery, system, vendor, vbmeta — type the name, pick the image
-- 🚀 **Temporary boot** — `fastboot boot` without permanently flashing
+### Flash
 
-### Fastboot tools
-- ⚡ Full command suite: `flash`, `boot`, `erase`, `format`, `wipe`, `getvar all`, `set_active`, `flashing unlock/lock`, `unlock_critical`, `oem`, raw commands
-- 🔀 A/B slot switching, reboot to system / recovery / fastboot / continue
-- 🧹 **Post-flash factory reset** — format data + metadata + cache, then reboot, right after flashing (prevents encryption bootloops)
-- 🛡️ Safety confirmations on every destructive action
+- Multi-image queue: add several files at once, set each partition independently, and flash the queue in one run.
+- SHA-256 checksum computed for every queued image.
+- Any partition name: boot, recovery, system, vendor, vbmeta, or a custom name.
+- Temporary boot with `fastboot boot` without permanently flashing.
+- Live transfer progress for flash and boot operations.
 
-### ADB tools
-- 🔍 ADB detection with full RSA auth handshake and device info (`getprop`)
-- 💻 **ADB shell** with output console
-- 📲 **ADB sideload** — install ROMs, GApps and OTA ZIPs directly from recovery
-- 📤 **ADB push** via the sync protocol with progress
-- 🔁 Reboot to bootloader / recovery / fastboot / download / system
+### Fastboot
 
-### Everywhere-compatible core
-- 🔓 **No root, no binaries** — pure Kotlin implementation using the Android USB Host API
-- 🌐 Universal fastboot detection by USB interface class — works across vendors
-- 📊 Live transfer progress, device info panel, and full session log
-- 🎨 Tabbed Material 3 interface (Flash / Fastboot / ADB / Console) with animated tab and dialog transitions
-- 🧩 **No bundled binaries and no bundled firmware** — everything runs on the Android USB Host API
+- Command suite: `flash`, `boot`, `erase`, `format`, `wipe`, `getvar all`, `set_active`, `flashing unlock` / `flashing lock`, `unlock_critical`, `oem`, and raw commands.
+- A/B slot switching and reboot to system, recovery, fastboot or continue.
+- Post-flash factory reset: format data, metadata and cache, then reboot, to avoid encryption bootloops.
+- Confirmation dialogs for every destructive action.
+
+### ADB
+
+- Device detection with a full RSA authentication handshake and device information via `getprop`.
+- Remote shell with an output console.
+- Sideload ROMs, GApps and OTA ZIPs directly from recovery.
+- Push files over the ADB sync protocol with progress.
+- Reboot to bootloader, recovery, fastboot, download or system.
+
+### Core
+
+- No root and no bundled binaries: pure Kotlin using the Android USB Host API.
+- Universal fastboot detection by USB interface class, across vendors.
+- Session log, device information panel and numeric transfer progress.
+- Tabbed Material 3 interface (Flash / Fastboot / ADB / Console) with animated transitions.
+- Standard and advanced operations are clearly separated; destructive operations are hidden behind an in-app Advanced switch.
 
 ---
 
@@ -88,69 +87,70 @@ Real UI captures from the v1.8 build on an unrooted Android phone.
 
 | Item | Detail |
 |---|---|
-| **Host phone** | Android 8.0+ with **OTG / USB host** support — **no root needed** |
-| **OTG cable** | A **data** cable (not charge-only) — USB-C → USB-A or USB-C → USB-C OTG adapter |
-| **Target device** | Either in **ADB mode** (USB debugging on) or **fastboot mode** (Volume Down + Power) |
-| **Images** | Correct ROM/firmware files stored on the host phone |
+| Host phone | Android 8.0+ with OTG / USB host support. No root needed. |
+| OTG cable | A data cable, not charge-only. USB-C to USB-A or USB-C to USB-C OTG adapter. |
+| Target device | Either ADB mode (USB debugging enabled) or fastboot mode (Volume Down + Power). |
+| Images | Correct ROM or firmware files stored on the host phone. |
 
-> ⚠️ Flashing firmware can **brick** a device if done wrong. FlashBridge confirms destructive actions, but you are responsible for using the correct files for your specific device.
+**Notice:** flashing firmware can brick a device if done incorrectly. FlashBridge confirms destructive actions, but you are responsible for using the correct files for your specific device.
 
 ---
 
 ## How it works
 
-Android's USB Host API lets an app claim a connected USB device's bulk endpoints. Both ADB and fastboot are just protocols over those endpoints.
+Android's USB Host API allows an app to claim the bulk endpoints of a connected USB device. Both ADB and fastboot are protocols over those endpoints.
 
 ### Detect
 
-After flashing a custom ROM, use the **After flashing** card on the Flash tab: **Factory reset** (format userdata + metadata + cache), then **Reboot system**. Formatting userdata clears the old encryption state, which is the usual cause of bootloops.
+Press **Detect device**. FlashBridge scans connected USB devices:
 
-Press **Detect device**. FlashBridge scans USB devices:
-
-1. **Fastboot device** — detected by the standard USB fastboot interface (`0xFF/0x42/0x03`), so it works across vendors; flash actions unlock.
-2. **ADB device** (USB class `0xFF` / subclass `0x42` / protocol `0x01`) → performs a full ADB handshake:
-   - Sends `CNXN`, handles `AUTH` tokens by signing with a locally generated 2048-bit RSA key (AOSP-compatible `RSAPublicKey` blob), so the standard "Allow USB debugging?" prompt appears on the target.
-   - Once authenticated, reads `getprop ro.product.model` / `getprop ro.product.device`.
-   - Offers **Reboot to Fastboot** (`adb reboot bootloader`) — then press Detect again to flash.
+1. **Fastboot device** — detected by the standard USB fastboot interface (`0xFF/0x42/0x03`), which works across vendors; flash actions then unlock.
+2. **ADB device** (USB class `0xFF`, subclass `0x42`, protocol `0x01`) — performs a full ADB handshake:
+   - Sends `CNXN` and handles `AUTH` tokens by signing with a locally generated 2048-bit RSA key in the AOSP-compatible `RSAPublicKey` format, so the standard "Allow USB debugging?" prompt appears on the target.
+   - Once authenticated, reads `getprop ro.product.model` and `getprop ro.product.device`.
+   - Offers **Reboot to Fastboot** (`adb reboot bootloader`); press Detect again to flash.
 
 ### Flash
 
 Fastboot is text commands over bulk USB:
 
-1. Send `flash:<partition>` → device replies `DATA<size>`.
+1. Send `flash:<partition>`; the device replies `DATA<size>`.
 2. Stream the selected image bytes over the bulk OUT endpoint with live progress.
 3. Verify the final `OKAY` reply.
 
-This is the same protocol `fastboot` on a PC uses — implemented natively in Kotlin, so no external binaries or root shell are involved.
+This is the same protocol that `fastboot` on a PC uses, implemented natively in Kotlin with no external binaries or root shell.
+
+### After flashing
+
+Use the **After flashing** card on the Flash tab: **Factory reset** (format userdata, metadata and cache), then **Reboot system**. Formatting userdata clears the old encryption state, which is the usual cause of bootloops.
 
 ### Sideload (recovery)
 
-Boot the target into custom recovery, choose **Apply update → Apply from ADB**, connect, press Detect, then **Sideload ZIP** on the Flash or ADB tab. The ZIP is streamed over the ADB `sideload:` service with live progress — exactly like `adb sideload` on a PC.
-
+Boot the target into custom recovery, choose **Apply update**, then **Apply from ADB**. Connect, press Detect, then use **Sideload ZIP** on the Flash or ADB tab. The ZIP is streamed over the ADB `sideload:` service with live progress, equivalent to `adb sideload` on a PC.
 
 ### Limitations
 
-Standard fastboot and ADB devices are supported across vendors. Samsung (Odin/download mode), Qualcomm 9008 (QFIL) and MediaTek BROM/preloader use proprietary protocols that are not supported. Bootloader unlock may additionally require OEM unlocking to be enabled, a Mi-account authorization (Xiaomi), or internet access depending on the vendor.
+Standard fastboot and ADB devices are supported across vendors. Samsung (Odin/download mode), Qualcomm 9008 (QFIL) and MediaTek BROM/preloader use proprietary protocols and are not supported. Bootloader unlock may additionally require OEM unlocking to be enabled, vendor authorisation or internet access, depending on the device.
 
 ---
 
 ## Build from source
 
-You need JDK 17 and Android SDK (platform 36, build-tools 35/36).
+You need JDK 17 and the Android SDK (platform 36, build tools 35/36).
 
 Two product flavors are produced:
 
-- `full` — all fastboot/ADB operations, with destructive ones behind an in-app Advanced switch. **This is the F-Droid / primary build.**
-- `play` — destructive/experimental operations compiled out (`BuildConfig.ADVANCED_FEATURES = false`). Kept for a restricted distribution; not required for F-Droid.
+- `full` — all fastboot and ADB operations, with destructive ones behind an in-app Advanced switch. This is the primary build used by F-Droid.
+- `play` — destructive and experimental operations compiled out (`BuildConfig.ADVANCED_FEATURES = false`). Kept for restricted distribution; not required for F-Droid.
 
 ```powershell
 .\gradlew.bat test assembleFullRelease
 ```
 
-The unsigned APK is at `app\build\outputs\apk\full\release\app-full-release-unsigned.apk`. F-Droid signs builds itself, so no local keystore is needed for submission. For local install, signing credentials come from `FB_KEYSTORE` / `FB_KEY_ALIAS` / `FB_STORE_PASS` / `FB_KEY_PASS` or an untracked `signing.properties`; the included `sign-and-install.ps1` reads the same values. Never commit a keystore.
+The unsigned APK is written to `app\build\outputs\apk\full\release\app-full-release-unsigned.apk`. F-Droid signs builds itself, so no local keystore is needed for submission. For local installation, signing credentials come from `FB_KEYSTORE` / `FB_KEY_ALIAS` / `FB_STORE_PASS` / `FB_KEY_PASS` or an untracked `signing.properties`; the included `sign-and-install.ps1` reads the same values. Never commit a keystore.
 
 ---
 
 ## Ownership
 
-This is an original project by **[netherish](https://github.com/netherish)**, released under the [MIT License](LICENSE). It contains no third-party binaries or copied code — just original Kotlin using the Android SDK and Apache-2.0 AndroidX/Compose libraries. F-Droid compatible.
+This is an original project by [netherish](https://github.com/netherish), released under the [MIT License](LICENSE). It contains no third-party binaries or copied code, only original Kotlin using the Android SDK and Apache-2.0 AndroidX/Compose libraries. F-Droid compatible.

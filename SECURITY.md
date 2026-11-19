@@ -7,8 +7,8 @@ Only the latest released version receives fixes. Downloads are published on the
 
 | Version | Supported |
 |---|---|
-| 1.6.x | ✅ |
-| < 1.6 | ❌ |
+| 1.8.x | Yes |
+| < 1.8 | No |
 
 ## Reporting a vulnerability
 
@@ -40,5 +40,6 @@ your data and verify that firmware matches the exact device model.
 
 ## Integrity
 
-Release APKs are signed with the maintainer's release key and a SHA-256 digest
-is published in the release notes. Verify the digest before installing.
+Release APKs are signed. GitHub publishes a SHA-256 digest for each release
+asset; verify it before installing. F-Droid builds and signs its own APK from
+source using the metadata in `fdroid.yml`.
