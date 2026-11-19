@@ -34,14 +34,14 @@ MaintainerNotes: |
   the source repository under fastlane/metadata/android/en-US/.
 
 Builds:
-  - versionName: '1.8'
-    versionCode: 9
-    commit: 98a05f93c4e8d34f1f7931b8f8973ad34bcb4a78
+  - versionName: '1.8.1'
+    versionCode: 10
+    commit: 0ba33799b25234a9dd4f2e5ff84e19ca242f730e
     gradle:
       - full
     output: app/build/outputs/apk/full/release/app-full-release-unsigned.apk
 
 AutoUpdateMode: Version
 UpdateCheckMode: Tags
-CurrentVersion: 1.8
-CurrentVersionCode: 9
+CurrentVersion: 1.8.1
+CurrentVersionCode: 10
