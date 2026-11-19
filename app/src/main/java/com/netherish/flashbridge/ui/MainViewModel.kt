@@ -323,9 +323,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         items.forEachIndexed { index, item ->
             append("[${index + 1}/${items.size}] Flashing ${Validation.logSafe(item.name)} → ${item.partition}")
             ctx.contentResolver.openInputStream(item.uri)?.use { input ->
-                fastboot.flash(item.partition, input) { sent, totalBytes ->
+                fastboot.flash(item.partition, item.size, input) { sent, totalBytes ->
                     val pct = if (totalBytes > 0) (sent * 100L / totalBytes).toInt().coerceIn(0, 100) else 0
-                    _state.value = _state.value.copy(progress = "${item.name}: $pct%", progressPercent = pct)
+                    val label = if (sent >= totalBytes && totalBytes > 0)
+                        "Upload complete — waiting for device"
+                    else "${item.name}: $pct%"
+                    _state.value = _state.value.copy(progress = label, progressPercent = pct)
                 }
             } ?: throw IllegalStateException("Cannot open ${item.name}")
             append("✓ ${item.partition} flashed")
@@ -337,7 +340,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val item = _state.value.queue.firstOrNull() ?: throw IllegalStateException("Add an image first")
         if (item.size <= 0) throw IllegalStateException("Unknown image size")
         getApplication<Application>().contentResolver.openInputStream(item.uri)?.use { input ->
-            fastboot.boot(input) { sent, total ->
+            fastboot.boot(item.size, input) { sent, total ->
                 val pct = if (total > 0) (sent * 100L / total).toInt().coerceIn(0, 100) else 0
                 _state.value = _state.value.copy(progress = "$pct%", progressPercent = pct)
             }

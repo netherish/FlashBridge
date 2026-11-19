@@ -28,7 +28,7 @@ import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.spec.PKCS8EncodedKeySpec
 import java.security.spec.X509EncodedKeySpec
-import java.util.zip.CRC32
+
 import javax.crypto.Cipher
 
 /**
@@ -129,10 +129,11 @@ class AdbUsb(private val context: Context) {
             connectAndHandshake(dev)
         } else {
             _status.value = AdbState.NeedPermission
-            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+            val intent = Intent(ACTION_USB_PERMISSION).setPackage(context.packageName)
+            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             else PendingIntent.FLAG_UPDATE_CURRENT
-            val pi = PendingIntent.getBroadcast(context, 0, Intent(ACTION_USB_PERMISSION), flags)
+            val pi = PendingIntent.getBroadcast(context, 0, intent, flags)
             usbManager.requestPermission(dev, pi)
         }
     }
@@ -418,13 +419,12 @@ class AdbUsb(private val context: Context) {
     // ------------------------------------------------------------------
 
     private fun sendPacket(packet: AdbPacket) {
-        val crc = CRC32().apply { update(packet.data) }
         val header = ByteBuffer.allocate(24).order(ByteOrder.LITTLE_ENDIAN).apply {
             putInt(packet.command)
             putInt(packet.arg0)
             putInt(packet.arg1)
             putInt(packet.data.size)
-            putInt(crc.value.toInt())
+            putInt(AdbKeyFormat.checksum(packet.data))
             putInt(packet.command xor -1)
         }
         writeBulk(header.array())
@@ -444,8 +444,8 @@ class AdbUsb(private val context: Context) {
         if (magic != (cmd xor -1)) throw IOException("Bad ADB magic")
         if (len < 0 || len > 1024 * 1024) throw IOException("Bad ADB payload length: $len")
         val data = if (len > 0) ByteArray(len).also { readBulk(it, len, timeout) } else ByteArray(0)
-        val actualCrc = CRC32().apply { update(data) }.value.toInt()
-        if (actualCrc != crc) throw IOException("ADB CRC mismatch")
+        val actualCrc = AdbKeyFormat.checksum(data)
+        if (actualCrc != crc) throw IOException("ADB checksum mismatch")
         return AdbPacket(cmd, arg0, arg1, data)
     }
 

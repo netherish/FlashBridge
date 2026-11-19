@@ -1,0 +1,6 @@
+Stability release for fastboot and ADB.
+
+- Fixed fastboot flashing with the correct AOSP sequence: download, stream data, then flash the partition.
+- Fixed stalled USB bulk writes and added pipelined transfers, so large images no longer take minutes.
+- Fixed ADB authorization with the AOSP public-key format and additive checksum.
+- Verified fastboot flashing and ADB connection on Redmi 9 and Vivo Y73.

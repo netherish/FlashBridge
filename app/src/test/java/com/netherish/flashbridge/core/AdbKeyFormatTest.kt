@@ -44,6 +44,14 @@ class AdbKeyFormatTest {
     }
 
     @Test
+    fun checksumIsAdditiveNotCrc32() {
+        assertEquals(0, AdbKeyFormat.checksum(ByteArray(0)))
+        assertEquals(6, AdbKeyFormat.checksum(byteArrayOf(1, 2, 3)))
+        assertEquals(255, AdbKeyFormat.checksum(byteArrayOf(-1))) // unsigned byte
+        assertEquals(562, AdbKeyFormat.checksum("host::\u0000".toByteArray(Charsets.US_ASCII)))
+    }
+
+    @Test
     fun payloadIsBase64StringWithNulTerminator() {
         val blob = keyPair().let { AdbKeyFormat.encodePublicKey(it.public as RSAPublicKey) }
         val payload = AdbKeyFormat.publicKeyPayload(blob)

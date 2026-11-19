@@ -23,6 +23,19 @@ internal object AdbKeyFormat {
     private const val MODULUS_BITS = 2048
     private const val MODULUS_WORDS = MODULUS_SIZE / 4
 
+    /**
+     * AOSP adb packet checksum: simple sum of unsigned payload bytes, stored
+     * in the `data_crc` header field. Not CRC-32 — using CRC-32 here makes
+     * every packet fail verification on the device.
+     *
+     * Reference: AOSP packages/modules/adb/adb.cpp calculate_apacket_checksum()
+     */
+    fun checksum(data: ByteArray): Int {
+        var sum = 0
+        for (b in data) sum += b.toInt() and 0xFF
+        return sum
+    }
+
     /** Android's custom 524-byte little-endian RSAPublicKey structure. */
     fun encodePublicKey(pub: RSAPublicKey): ByteArray {
         val n = pub.modulus

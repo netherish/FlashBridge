@@ -14,7 +14,8 @@ and bootloader implementations vary by device. This page collects real reports.
 
 | Target | Mode | Action | Result | Notes | Reported by |
 |---|---|---|---|---|---|
-| — | — | — | Not yet reported | Target-device testing needs a data-capable OTG cable and correct images | — |
+| Redmi 9 | Fastboot | Flash a 64 MiB `boot` image | Success | Verified with the v1.8.1 build; ADB connection also confirmed | netherish |
+| Vivo Y73 | Fastboot and ADB | Flash image, ADB authorize and connect | Success | Verified with the v1.8.1 build, including the AOSP-compatible authorization fix | netherish |
 
 ## How to test safely
 

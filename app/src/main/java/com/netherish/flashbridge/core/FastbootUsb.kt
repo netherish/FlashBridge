@@ -11,11 +11,13 @@ import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
+import android.hardware.usb.UsbRequest
 import android.os.Build
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.io.IOException
 import java.io.InputStream
+import java.nio.ByteBuffer
 
 /**
  * Speaks the fastboot protocol directly over Android's USB Host API.
@@ -34,6 +36,13 @@ class FastbootUsb(private val context: Context) {
     private var claimedInterface: UsbInterface? = null
     private var connectedDevice: UsbDevice? = null
     private var connecting = false
+
+    /** Diagnostic only — reported in transfer errors, never used to block a flash. */
+    @Volatile
+    private var deviceMaxDownloadSize: String? = null
+
+    /** Length of the final bulk-OUT packet; drives the ZLP decision. */
+    private var lastTransferLength = 0
 
     private val _status = MutableStateFlow<UsbState>(UsbState.Idle)
     val status: StateFlow<UsbState> = _status
@@ -112,10 +121,11 @@ class FastbootUsb(private val context: Context) {
             connect(device)
         } else {
             _status.value = UsbState.NeedPermission
-            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+            val intent = Intent(ACTION_USB_PERMISSION).setPackage(context.packageName)
+            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             else PendingIntent.FLAG_UPDATE_CURRENT
-            val pi = PendingIntent.getBroadcast(context, 0, Intent(ACTION_USB_PERMISSION), flags)
+            val pi = PendingIntent.getBroadcast(context, 0, intent, flags)
             usbManager.requestPermission(device, pi)
         }
     }
@@ -197,22 +207,30 @@ class FastbootUsb(private val context: Context) {
         val out = bulkOut ?: throw IOException("Device disconnected")
         val bytes = cmd.toByteArray(Charsets.US_ASCII)
         val written = conn.bulkTransfer(out, bytes, bytes.size, timeout)
-        if (written != bytes.size) throw IOException("Bulk write failed ($written/${bytes.size})")
-        readReplyLocked(timeout)
+        if (written != bytes.size) throw IOException("Bulk write failed while sending $cmd ($written/${bytes.size})")
+        readReplyLocked(timeout, "reply to $cmd")
     }
 
     /** Read a reply without sending a command (used to drain INFO lines). */
-    fun readMore(timeout: Int = 5000): FastbootReply = synchronized(lock) {
+    fun readMore(timeout: Int = 5000, stage: String = "more data"): FastbootReply = synchronized(lock) {
         requireConnection()
-        readReplyLocked(timeout)
+        readReplyLocked(timeout, stage)
     }
 
-    private fun readReplyLocked(timeout: Int): FastbootReply {
+    private fun readReplyLocked(timeout: Int, stage: String): FastbootReply {
         val conn = connection ?: throw IOException("Device disconnected")
         val inp = bulkIn ?: throw IOException("Device disconnected")
         val buf = ByteArray(256)
-        val len = conn.bulkTransfer(inp, buf, buf.size, timeout)
-        if (len < 4) throw IOException("Short fastboot reply ($len bytes)")
+        var len = conn.bulkTransfer(inp, buf, buf.size, timeout)
+        if (len < 0) {
+            // A bulk endpoint can stall after a large transfer. Android reports
+            // that as -1 rather than a distinct error code, so clear the halt
+            // and give the device one more chance before surfacing a failure.
+            clearEndpointHalt(conn, inp)
+            len = conn.bulkTransfer(inp, buf, buf.size, timeout)
+        }
+        if (len < 0) throw IOException("Fastboot read error while waiting for $stage (code $len)")
+        if (len < 4) throw IOException("Short fastboot reply while waiting for $stage ($len bytes)")
         val status = String(buf, 0, 4, Charsets.US_ASCII)
         val payload = if (len > 4) String(buf, 4, len - 4, Charsets.US_ASCII) else ""
         return FastbootReply(status, payload)
@@ -225,7 +243,7 @@ class FastbootUsb(private val context: Context) {
         var count = 0
         while (reply.status == "INFO" && count < MAX_INFO_LINES) {
             info += reply.payload.trim()
-            reply = readMore()
+            reply = readMore(stage = "INFO line")
             count++
         }
         if (reply.status == "INFO") throw IOException("Too many INFO lines from device")
@@ -250,18 +268,19 @@ class FastbootUsb(private val context: Context) {
         return reply.payload.trim()
     }
 
-    /** Flash an image: sends flash:<partition>, streams DATA, verifies OKAY. */
-    fun flash(partition: String, input: InputStream, onProgress: (Long, Long) -> Unit) {
+    /**
+     * Flash an image using the standard AOSP fastboot sequence:
+     * `download:<hex size>` -> DATA<hex size> -> stream bytes -> OKAY,
+     * then `flash:<partition>` -> OKAY.
+     *
+     * Sending `flash:` before the download is a protocol error; bootloaders
+     * answer OKAY (no data expected), which historically surfaced as
+     * "Expected DATA, got OKAY" and made every flash appear to do nothing.
+     */
+    fun flash(partition: String, size: Long, input: InputStream, onProgress: (Long, Long) -> Unit) {
         if (!Validation.isValidPartition(partition)) throw IllegalArgumentException("Invalid partition name")
-        val (_, reply) = drainInfo(command("flash:$partition"))
-        if (reply.status == "FAIL") throw IOException(reply.payload.trim().ifEmpty { "flash rejected" })
-        if (reply.status != "DATA") throw IOException("Expected DATA, got ${reply.status}")
-
-        val total = parseDataLength(reply.payload)
-        streamData(total, input, onProgress)
-        val final = readMore(60000)
-        if (final.status == "FAIL") throw IOException(final.payload.trim().ifEmpty { "Flash failed" })
-        if (final.status != "OKAY") throw IOException("Unexpected flash result: ${final.status}")
+        download(size, input, onProgress)
+        simple("flash:$partition")
     }
 
     /** `getvar all` — dump every bootloader variable. */
@@ -272,33 +291,127 @@ class FastbootUsb(private val context: Context) {
     }
 
     /** Boots an image without flashing it (temporary boot). */
-    fun boot(input: InputStream, onProgress: (Long, Long) -> Unit) = downloadAndExecute("boot", input, onProgress)
-
-    private fun downloadAndExecute(cmd: String, input: InputStream, onProgress: (Long, Long) -> Unit) {
-        val (_, reply) = drainInfo(command(cmd))
-        if (reply.status == "FAIL") throw IOException(reply.payload.trim().ifEmpty { "$cmd rejected" })
-        if (reply.status != "DATA") throw IOException("Expected DATA, got ${reply.status}")
-        streamData(parseDataLength(reply.payload), input, onProgress)
-        val final = readMore(60000)
-        if (final.status == "FAIL") throw IOException(final.payload.trim().ifEmpty { "$cmd failed" })
-        if (final.status != "OKAY") throw IOException("Unexpected $cmd result: ${final.status}")
+    fun boot(size: Long, input: InputStream, onProgress: (Long, Long) -> Unit) {
+        download(size, input, onProgress)
+        simple("boot")
     }
 
+    /** Stage image bytes in the bootloader buffer; caller issues the final command. */
+    private fun download(size: Long, input: InputStream, onProgress: (Long, Long) -> Unit) {
+        // Query but never enforce: the user decides what is safe to flash.
+        deviceMaxDownloadSize = try { getvar("max-download-size") } catch (_: Throwable) { null }
+
+        val (_, reply) = drainInfo(command(downloadCommand(size)))
+        if (reply.status == "FAIL") throw IOException(reply.payload.trim().ifEmpty { "download rejected" })
+        if (reply.status != "DATA") throw IOException("Expected DATA, got ${reply.status}")
+
+        val expected = parseDataLength(reply.payload)
+        streamData(expected, input, onProgress)
+        maybeSendZeroLengthPacket()
+        val (_, final) = drainInfo(readMore(30000, "download result"))
+        if (final.status == "FAIL") throw IOException(final.payload.trim().ifEmpty { "Download failed" })
+        if (final.status != "OKAY") throw IOException("Unexpected download result: ${final.status}")
+    }
+
+    /**
+     * A bulk transfer ending on a full-size packet needs an explicit ZLP to
+     * terminate it. Bootloaders that know the expected byte count usually do
+     * not care, but some MTK bootloaders wait forever without it.
+     */
+    private fun maybeSendZeroLengthPacket() {
+        synchronized(lock) {
+            val conn = connection ?: return
+            val out = bulkOut ?: return
+            val mps = out.maxPacketSize.takeIf { it > 0 } ?: 64
+            if (lastTransferLength <= 0 || lastTransferLength % mps != 0) return
+            try {
+                conn.bulkTransfer(out, ByteArray(0), 0, 5000)
+            } catch (_: Throwable) {}
+        }
+    }
+
+    /** Clear an endpoint's STALL condition using a standard USB control request. */
+    private fun clearEndpointHalt(conn: UsbDeviceConnection, ep: UsbEndpoint) {
+        try {
+            conn.controlTransfer(
+                0x02, // USB_TYPE_STANDARD | USB_RECIP_ENDPOINT
+                0x01, // USB_REQ_CLEAR_FEATURE
+                0,    // USB_FEATURE_ENDPOINT_HALT
+                ep.address,
+                null, 0, 1000,
+            )
+        } catch (_: Throwable) {}
+    }
+
+    /**
+     * Stream image data with a pipeline of asynchronous USB requests.
+     *
+     * A synchronous bulkTransfer() costs a JNI round trip per packet. At the
+     * 64-byte packet size some bootloaders require, that made a 64 MiB image
+     * take minutes. Queuing many URBs at once keeps the bus busy while Kotlin
+     * prepares the next buffers.
+     */
     private fun streamData(total: Long, input: InputStream, onProgress: (Long, Long) -> Unit) {
-        val chunk = ByteArray(16384)
-        var sent = 0L
-        while (sent < total) {
-            val want = minOf(chunk.size.toLong(), total - sent).toInt()
-            val read = input.read(chunk, 0, want)
-            if (read <= 0) throw IOException("Unexpected end of image")
-            synchronized(lock) {
-                val conn = connection ?: throw IOException("Device disconnected during transfer")
-                val out = bulkOut ?: throw IOException("Device disconnected during transfer")
-                val w = conn.bulkTransfer(out, chunk, read, 10000)
-                if (w != read) throw IOException("Bulk data write failed")
+        val packetSize = synchronized(lock) {
+            bulkOut?.maxPacketSize?.takeIf { it > 0 } ?: 64
+        }
+        val depth = 32
+        val (conn, out) = synchronized(lock) {
+            val c = connection ?: throw IOException("Device disconnected during transfer")
+            val e = bulkOut ?: throw IOException("Device disconnected during transfer")
+            c to e
+        }
+
+        val requests = Array(depth) { UsbRequest() }
+        val buffers = Array(depth) { ByteBuffer.allocateDirect(packetSize) }
+        val lengths = IntArray(depth)
+        synchronized(lock) {
+            requests.forEachIndexed { i, request ->
+                if (!request.initialize(conn, out)) throw IOException("Failed to initialize USB request $i")
+                request.clientData = i
             }
-            sent += read
-            onProgress(sent, total)
+        }
+
+        var queued = 0L
+        var completed = 0L
+        var inFlight = 0
+        var next = 0
+        val scratch = ByteArray(packetSize)
+        try {
+            while (completed < total || inFlight > 0) {
+                while (inFlight < depth && queued < total) {
+                    val want = minOf(packetSize.toLong(), total - queued).toInt()
+                    val read = input.read(scratch, 0, want)
+                    if (read <= 0) throw IOException("Unexpected end of image at $queued/$total bytes")
+                    val idx = next
+                    next = (next + 1) % depth
+                    buffers[idx].clear()
+                    buffers[idx].put(scratch, 0, read)
+                    buffers[idx].rewind()
+                    val ok = synchronized(lock) { requests[idx].queue(buffers[idx], read) }
+                    if (!ok) throw IOException("USB request queue failed at $queued/$total bytes")
+                    lengths[idx] = read
+                    queued += read
+                    inFlight++
+                }
+                if (inFlight > 0) {
+                    val request = synchronized(lock) { connection?.requestWait(60000) }
+                        ?: throw IOException("USB request wait failed at $completed/$total bytes")
+                    val idx = request.clientData as? Int
+                        ?: throw IOException("Unexpected USB request completion")
+                    inFlight--
+                    completed += lengths[idx]
+                    lastTransferLength = lengths[idx]
+                    onProgress(completed, total)
+                }
+            }
+        } finally {
+            synchronized(lock) {
+                requests.forEach { request ->
+                    try { request.cancel() } catch (_: Throwable) {}
+                    try { request.close() } catch (_: Throwable) {}
+                }
+            }
         }
     }
 
@@ -386,6 +499,10 @@ class FastbootUsb(private val context: Context) {
     companion object {
         const val ACTION_USB_PERMISSION = "com.netherish.flashbridge.USB_PERMISSION"
         private const val MAX_INFO_LINES = 256
+
+        /** AOSP uses `download:%08x` (lower-case, zero-padded, 8 hex digits). */
+        internal fun downloadCommand(size: Long): String =
+            "download:" + size.toString(16).padStart(8, '0')
 
         fun isFastboot(device: UsbDevice): Boolean {
             for (i in 0 until device.interfaceCount) {

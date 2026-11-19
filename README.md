@@ -8,7 +8,7 @@
 ![Platform](https://img.shields.io/badge/Platform-Android-3DDC84?logo=android&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-blue)
 
-[Download FlashBridge v1.8 (APK)](https://github.com/netherish/FlashBridge/releases/download/v1.8/FlashBridge-v1.8-full.apk)
+[Download FlashBridge v1.8.1 (APK)](https://github.com/netherish/FlashBridge/releases/download/v1.8.1/FlashBridge-v1.8.1-full.apk)
 
 </div>
 
@@ -16,7 +16,7 @@
 
 ## Download
 
-**[Download the latest APK (v1.8)](https://github.com/netherish/FlashBridge/releases/download/v1.8/FlashBridge-v1.8-full.apk)** — Android 8.0+, no root required.
+**[Download the latest APK (v1.8.1)](https://github.com/netherish/FlashBridge/releases/download/v1.8.1/FlashBridge-v1.8.1-full.apk)** — Android 8.0+, no root required.
 
 Or browse [all releases](https://github.com/netherish/FlashBridge/releases). Before installing, review the [compatibility reports](docs/TESTED_DEVICES.md) and the [security policy](SECURITY.md).
 
@@ -36,7 +36,7 @@ Host phone (FlashBridge, unrooted) -- OTG cable / bulk USB --> Target phone (fas
 
 ## Screenshots
 
-Captures from the v1.8 build on an unrooted Android phone.
+Captures from the v1.8.1 build on an unrooted Android phone.
 
 | Flash queue | Fastboot tools | ADB tools |
 |:---:|:---:|:---:|
@@ -112,11 +112,11 @@ Press **Detect device**. FlashBridge scans connected USB devices:
 
 ### Flash
 
-Fastboot is text commands over bulk USB:
+Fastboot is text commands over bulk USB. Flashing uses the standard three-step AOSP sequence:
 
-1. Send `flash:<partition>`; the device replies `DATA<size>`.
-2. Stream the selected image bytes over the bulk OUT endpoint with live progress.
-3. Verify the final `OKAY` reply.
+1. Send `download:<size in hex>`; the device replies `DATA<size in hex>`.
+2. Stream exactly that many image bytes over the bulk OUT endpoint using pipelined USB requests, with live progress.
+3. Verify the upload reply, then send `flash:<partition>` and verify the final `OKAY`.
 
 This is the same protocol that `fastboot` on a PC uses, implemented natively in Kotlin with no external binaries or root shell.
 
