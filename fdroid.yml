@@ -1,0 +1,42 @@
+# F-Droid metadata template.
+# Copy this file to fdroiddata/metadata/com.netherish.flashbridge.yml when
+# submitting. The `commit` must point to a real tag (create `v1.8` first).
+
+Categories:
+  - System
+  - Development
+License: MIT
+AuthorName: netherish
+SourceCode: https://github.com/netherish/FlashBridge
+IssueTracker: https://github.com/netherish/FlashBridge/issues
+Changelog: https://github.com/netherish/FlashBridge/releases
+Repo: https://github.com/netherish/FlashBridge
+RepoType: git
+
+Description: |
+  FlashBridge turns an Android phone with OTG support into a firmware utility
+  for devices you own or are authorised to modify. It implements the fastboot
+  and ADB protocols directly in Kotlin over the Android USB Host API.
+
+  Features include a multi-image flash queue with per-partition targets and
+  SHA-256 checksums, temporary boot, getvar all, A/B slot switching, factory
+  reset, sideload and push, shell access, reboot targets, and an Advanced mode
+  for erase/format/wipe/unlock/raw commands.
+
+  No root, no bundled binaries, no bundled firmware and no vendor exploits.
+  Every destructive action shows an exact-operation confirmation. Standard
+  and advanced operations are clearly separated.
+
+Builds:
+  - versionName: 1.8
+    versionCode: 9
+    commit: v1.8
+    gradle:
+      - assembleFullRelease
+    output: app/build/outputs/apk/full/release/app-full-release-unsigned.apk
+    timeout: 30min
+
+AutoUpdateMode: Version
+UpdateCheckMode: Tags
+CurrentVersion: 1.8
+CurrentVersionCode: 9

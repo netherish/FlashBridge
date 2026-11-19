@@ -32,7 +32,6 @@ body:
         - "Fastboot"
         - "ADB"
         - "Recovery / sideload"
-        - "MediaTek BROM / preloader"
         - "Not applicable (host)"
     validations:
       required: true

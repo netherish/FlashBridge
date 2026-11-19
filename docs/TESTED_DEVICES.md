@@ -24,6 +24,6 @@ and bootloader implementations vary by device. This page collects real reports.
    before trying any write.
 4. Confirm that the image matches the exact model and partition.
 5. Report results with: host model, target model, Android version, mode
-   (fastboot/ADB/BROM), cable type, and the exact command used.
+   (fastboot/ADB/recovery), cable type, and the exact command used.
 
 Open an issue using the **Compatibility report** template to add your results.

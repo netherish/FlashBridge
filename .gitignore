@@ -7,5 +7,19 @@
 /captures
 .externalNativeBuild
 .cxx
+.kotlin/
 local.properties
 app/build/
+
+# Signing material must never be committed.
+*.jks
+*.keystore
+*.p12
+*.pfx
+signing.properties
+*.pepk
+
+# Build outputs and local install artifacts.
+*.apk
+*.aab
+/app/build/

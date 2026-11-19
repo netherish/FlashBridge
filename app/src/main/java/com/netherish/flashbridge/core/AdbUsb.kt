@@ -5,12 +5,17 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.SharedPreferences
 import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
+import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import android.os.Build
+import android.util.Base64
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.io.IOException
@@ -23,7 +28,6 @@ import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.spec.PKCS8EncodedKeySpec
 import java.security.spec.X509EncodedKeySpec
-import android.util.Base64
 import java.util.zip.CRC32
 import javax.crypto.Cipher
 
@@ -40,12 +44,20 @@ import javax.crypto.Cipher
 class AdbUsb(private val context: Context) {
 
     private val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
+    private val lock = Any()
+
     private var connection: UsbDeviceConnection? = null
     private var bulkOut: UsbEndpoint? = null
     private var bulkIn: UsbEndpoint? = null
+    private var claimedInterface: UsbInterface? = null
+    private var connectedDevice: UsbDevice? = null
+    private var connecting = false
     private var connected = false
     private var remoteId = 0
     private var maxData = 4096
+
+    /** Used only when the Android keystore is unavailable; never written to disk. */
+    private var ephemeralKey: KeyPair? = null
 
     private val _status = MutableStateFlow<AdbState>(AdbState.Idle)
     val status: StateFlow<AdbState> = _status
@@ -53,17 +65,10 @@ class AdbUsb(private val context: Context) {
     private val _deviceInfo = MutableStateFlow<UsbInfo?>(null)
     val deviceInfo: StateFlow<UsbInfo?> = _deviceInfo
 
-    private var device: UsbDevice? = null
-
     private val permissionReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
             if (ACTION_USB_PERMISSION != intent.action) return
-            val dev: UsbDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
-            } else {
-                @Suppress("DEPRECATION")
-                intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
-            }
+            val dev = intent.deviceExtra()
             if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false) && dev != null) {
                 connectAndHandshake(dev)
             } else {
@@ -72,12 +77,31 @@ class AdbUsb(private val context: Context) {
         }
     }
 
+    private val detachReceiver = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context, intent: Intent) {
+            if (intent.action != UsbManager.ACTION_USB_DEVICE_DETACHED) return
+            val detached = intent.deviceExtra() ?: return
+            synchronized(lock) {
+                val current = connectedDevice
+                if (current != null && FastbootUsb.sameDevice(current, detached)) {
+                    closeLocked()
+                    _status.value = AdbState.Error("Device disconnected during session")
+                }
+            }
+        }
+    }
+
     init {
-        val filter = IntentFilter(ACTION_USB_PERMISSION)
+        register(permissionReceiver, ACTION_USB_PERMISSION)
+        register(detachReceiver, UsbManager.ACTION_USB_DEVICE_DETACHED)
+    }
+
+    private fun register(receiver: BroadcastReceiver, action: String) {
+        val filter = IntentFilter(action)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            context.registerReceiver(permissionReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
-            context.registerReceiver(permissionReceiver, filter)
+            context.registerReceiver(receiver, filter)
         }
     }
 
@@ -89,12 +113,17 @@ class AdbUsb(private val context: Context) {
             _status.value = AdbState.Error("No USB host support")
             return
         }
+        synchronized(lock) {
+            val current = connectedDevice
+            if (connected && current != null &&
+                usbManager.deviceList.values.any { FastbootUsb.sameDevice(it, current) }
+            ) return
+        }
         val dev = usbManager.deviceList.values.firstOrNull { isAdbDevice(it) }
         if (dev == null) {
             _status.value = AdbState.NoDevice("No ADB device found")
             return
         }
-        device = dev
         _deviceInfo.value = dev.toInfo()
         if (usbManager.hasPermission(dev)) {
             connectAndHandshake(dev)
@@ -109,55 +138,64 @@ class AdbUsb(private val context: Context) {
     }
 
     private fun connectAndHandshake(dev: UsbDevice) {
-        try {
-            val conn = usbManager.openDevice(dev) ?: throw IOException("openDevice returned null")
-            var out: UsbEndpoint? = null
-            var inn: UsbEndpoint? = null
-            var adbInterface: android.hardware.usb.UsbInterface? = null
+        synchronized(lock) {
+            if (connecting) return
+            connecting = true
+            var conn: UsbDeviceConnection? = null
+            try {
+                closeLocked()
+                conn = usbManager.openDevice(dev) ?: throw IOException("openDevice returned null")
+                var out: UsbEndpoint? = null
+                var inn: UsbEndpoint? = null
+                var adbInterface: UsbInterface? = null
 
-            for (i in 0 until dev.interfaceCount) {
-                val intf = dev.getInterface(i)
-                if (intf.interfaceClass != 0xFF || intf.interfaceSubclass != 0x42 || intf.interfaceProtocol != 0x01) continue
-                for (e in 0 until intf.endpointCount) {
-                    val ep = intf.getEndpoint(e)
-                    if (ep.type != UsbConstants.USB_ENDPOINT_XFER_BULK) continue
-                    if (ep.direction == UsbConstants.USB_DIR_OUT && out == null) out = ep
-                    if (ep.direction == UsbConstants.USB_DIR_IN && inn == null) inn = ep
+                for (i in 0 until dev.interfaceCount) {
+                    val intf = dev.getInterface(i)
+                    if (intf.interfaceClass != 0xFF || intf.interfaceSubclass != 0x42 ||
+                        intf.interfaceProtocol != 0x01) continue
+                    for (e in 0 until intf.endpointCount) {
+                        val ep = intf.getEndpoint(e)
+                        if (ep.type != UsbConstants.USB_ENDPOINT_XFER_BULK) continue
+                        if (ep.direction == UsbConstants.USB_DIR_OUT && out == null) out = ep
+                        if (ep.direction == UsbConstants.USB_DIR_IN && inn == null) inn = ep
+                    }
+                    if (out != null && inn != null) {
+                        adbInterface = intf
+                        break
+                    }
                 }
-                if (out != null && inn != null) {
-                    adbInterface = intf
-                    break
+                if (out == null || inn == null || adbInterface == null) {
+                    throw IOException("No ADB bulk endpoints found")
                 }
-            }
-            if (out == null || inn == null || adbInterface == null) {
-                conn.close()
-                throw IOException("No ADB bulk endpoints found")
-            }
-            if (!conn.claimInterface(adbInterface, true)) {
-                conn.close()
-                throw IOException("Failed to claim ADB interface")
-            }
-            connection = conn
-            bulkOut = out
-            bulkIn = inn
-            connected = true
+                if (!conn.claimInterface(adbInterface, true)) {
+                    throw IOException("Failed to claim ADB interface")
+                }
 
-            handshake()
-            _status.value = AdbState.Connected(dev.toInfo())
-        } catch (e: Throwable) {
-            connected = false
-            _status.value = AdbState.Error(e.message ?: "ADB connection failed")
+                connection = conn
+                bulkOut = out
+                bulkIn = inn
+                claimedInterface = adbInterface
+                connectedDevice = dev
+                connected = true
+
+                handshake()
+                _status.value = AdbState.Connected(dev.toInfo())
+            } catch (e: Throwable) {
+                closeLocked()
+                _status.value = AdbState.Error(e.message ?: "ADB connection failed")
+            } finally {
+                connecting = false
+            }
         }
     }
 
-    fun isConnected(): Boolean = connected
+    fun isConnected(): Boolean = synchronized(lock) { connected }
 
     // ------------------------------------------------------------------
     // ADB handshake
     // ------------------------------------------------------------------
 
     private fun handshake() {
-        // CNXN: version, maxdata=4096, "host::\0"
         val identity = "host::\u0000".toByteArray(Charsets.US_ASCII)
         sendPacket(AdbPacket(A_CNXN, ADB_VERSION, ADB_MAXDATA, identity))
 
@@ -166,16 +204,11 @@ class AdbUsb(private val context: Context) {
         while (reply.command == A_AUTH && reply.arg0 == AUTH_TOKEN && attempt < 3) {
             attempt++
             if (attempt == 1) {
-                // Try signing with our private key
                 val sig = signToken(reply.data)
-                if (sig != null) {
-                    sendPacket(AdbPacket(A_AUTH, AUTH_SIGNATURE, 0, sig))
-                } else {
-                    sendPublicKey()
-                }
+                if (sig != null) sendPacket(AdbPacket(A_AUTH, AUTH_SIGNATURE, 0, sig))
+                else sendPublicKey()
             } else {
-                // Device rejected signature — send public key to trigger
-                // the "Allow USB debugging?" prompt on the target.
+                // Device rejected signature — trigger the "Allow USB debugging?" prompt.
                 sendPublicKey()
             }
             reply = readPacket(if (attempt >= 2) 20000 else 8000)
@@ -183,7 +216,6 @@ class AdbUsb(private val context: Context) {
         if (reply.command != A_CNXN) {
             throw IOException("ADB auth failed: ${cmdName(reply.command)}")
         }
-        // Device tells us its max payload in arg1 of its CNXN
         maxData = reply.arg1.takeIf { it in 4096..(1024 * 1024) } ?: 4096
     }
 
@@ -200,11 +232,17 @@ class AdbUsb(private val context: Context) {
     // ------------------------------------------------------------------
 
     /** Read a device property via `shell:getprop name`. */
-    fun getprop(name: String): String = shell("getprop $name").trim()
+    fun getprop(name: String): String {
+        if (name.isBlank() || name.length > 128 || name.any { it == '\u0000' }) {
+            throw IllegalArgumentException("Invalid property name")
+        }
+        return shell("getprop $name").trim()
+    }
 
     /** Run a shell command and return combined output. */
-    fun shell(command: String, timeout: Int = 10000): String {
+    fun shell(command: String, timeout: Int = 10000): String = synchronized(lock) {
         requireConnected()
+        if (!Validation.isValidShellCommand(command)) throw IllegalArgumentException("Invalid shell command")
         val localId = 1
         val dest = "shell:$command\u0000".toByteArray(Charsets.UTF_8)
         sendPacket(AdbPacket(A_OPEN, localId, 0, dest))
@@ -215,46 +253,47 @@ class AdbUsb(private val context: Context) {
         remoteId = reply.arg0
 
         val out = StringBuilder()
-        val deadline = System.currentTimeMillis() + timeout
-        while (System.currentTimeMillis() < deadline) {
+        val deadline = System.currentTimeMillis() + timeout.coerceAtMost(60000)
+        var packets = 0
+        while (System.currentTimeMillis() < deadline && packets < MAX_SHELL_PACKETS) {
             val pkt = readPacket(timeout)
+            packets++
             when (pkt.command) {
                 A_WRTE -> {
                     out.append(String(pkt.data, Charsets.UTF_8))
-                    // Acknowledge
                     sendPacket(AdbPacket(A_OKAY, localId, remoteId, ByteArray(0)))
                 }
                 A_CLSE -> {
                     sendPacket(AdbPacket(A_CLSE, localId, remoteId, ByteArray(0)))
                     break
                 }
-                A_OKAY -> { /* flow control ack */ }
-                else -> { /* ignore */ }
+                A_OKAY -> Unit
+                else -> Unit
             }
         }
-        return out.toString()
+        out.toString()
     }
 
-    /** Reboot the device into the given target (e.g. "bootloader", "recovery", "download"). */
-    fun reboot(target: String = "bootloader") {
+    /** Reboot the device into the given target (e.g. "bootloader", "recovery"). */
+    fun reboot(target: String = "bootloader") = synchronized(lock) {
         requireConnected()
+        if (target.length > 64 || target.any { it == '\u0000' || it == '\n' }) {
+            throw IllegalArgumentException("Invalid reboot target")
+        }
         val localId = 2
         val dest = "reboot:$target\u0000".toByteArray(Charsets.US_ASCII)
         sendPacket(AdbPacket(A_OPEN, localId, 0, dest))
         // Device reboots immediately; don't block waiting for a reply.
     }
 
-    /**
-     * ADB sideload — stream a ZIP (ROM / GApps / OTA) to a device in
-     * recovery mode. This is how most custom ROMs are actually installed.
-     */
-    fun sideload(input: InputStream, size: Long, onProgress: (Long, Long) -> Unit) {
-        requireConnected()
+    /** Stream an update ZIP to a device in recovery mode. */
+    fun sideload(input: InputStream, size: Long, onProgress: (Long, Long) -> Unit) = synchronized(lock) {
+        requireTransfer(size)
         val localId = 5
         val dest = "sideload:\u0000".toByteArray(Charsets.US_ASCII)
         sendPacket(AdbPacket(A_OPEN, localId, 0, dest))
 
-        var reply = readPacket(60000) // recovery can take a while to start
+        var reply = readPacket(60000)
         if (reply.command == A_FAIL) throw IOException(String(reply.data, Charsets.UTF_8).trim())
         if (reply.command != A_OKAY) throw IOException("Sideload OPEN failed: ${cmdName(reply.command)}")
         remoteId = reply.arg0
@@ -264,7 +303,7 @@ class AdbUsb(private val context: Context) {
         while (sent < size) {
             val want = minOf(chunk.size.toLong(), size - sent).toInt()
             val read = input.read(chunk, 0, want)
-            if (read <= 0) break
+            if (read <= 0) throw IOException("Unexpected end of ZIP — expected $size bytes, got $sent")
             sendPacket(AdbPacket(A_WRTE, localId, remoteId, chunk.copyOf(read)))
             reply = readPacket(60000)
             if (reply.command == A_FAIL) throw IOException(String(reply.data, Charsets.UTF_8).trim())
@@ -278,11 +317,13 @@ class AdbUsb(private val context: Context) {
 
     /** Push a file to the device via the ADB `sync:` service. */
     fun push(input: InputStream, size: Long, remotePath: String, permission: Int = 420,
-             onProgress: (Long, Long) -> Unit) {
-        requireConnected()
+             onProgress: (Long, Long) -> Unit) = synchronized(lock) {
+        requireTransfer(size)
+        if (!Validation.isValidRemotePath(remotePath)) throw IllegalArgumentException("Invalid remote path")
         val localId = 6
         sendPacket(AdbPacket(A_OPEN, localId, 0, "sync:\u0000".toByteArray(Charsets.US_ASCII)))
         var reply = readPacket(10000)
+        if (reply.command == A_FAIL) throw IOException(String(reply.data, Charsets.UTF_8).trim())
         if (reply.command != A_OKAY) throw IOException("sync OPEN failed: ${cmdName(reply.command)}")
         remoteId = reply.arg0
 
@@ -299,7 +340,7 @@ class AdbUsb(private val context: Context) {
         while (sent < size) {
             val want = minOf(chunk.size.toLong(), size - sent).toInt()
             val read = input.read(chunk, 0, want)
-            if (read <= 0) break
+            if (read <= 0) throw IOException("Unexpected end of file — expected $size bytes, got $sent")
             val header = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
                 .put("DATA".toByteArray(Charsets.US_ASCII)).putInt(read).array()
             val payload = header + chunk.copyOf(read)
@@ -319,28 +360,39 @@ class AdbUsb(private val context: Context) {
         sendPacket(AdbPacket(A_CLSE, localId, remoteId, ByteArray(0)))
     }
 
+    private fun requireTransfer(size: Long) {
+        requireConnected()
+        if (!Validation.isValidFileSize(size)) throw IOException("Invalid file size: $size")
+    }
+
     private fun waitOkay(localId: Int, timeout: Int) {
         val reply = readPacket(timeout)
         if (reply.command == A_FAIL) throw IOException(String(reply.data, Charsets.UTF_8).trim())
         if (reply.command != A_OKAY) throw IOException("Expected OKAY, got ${cmdName(reply.command)}")
     }
 
-    fun close() {
+    fun close() = synchronized(lock) { closeLocked() }
+
+    private fun closeLocked() {
+        try { claimedInterface?.let { connection?.releaseInterface(it) } } catch (_: Throwable) {}
         try { connection?.close() } catch (_: Throwable) {}
         connection = null
         bulkIn = null
         bulkOut = null
+        claimedInterface = null
+        connectedDevice = null
         connected = false
     }
 
     fun dispose() {
         close()
         try { context.unregisterReceiver(permissionReceiver) } catch (_: Throwable) {}
+        try { context.unregisterReceiver(detachReceiver) } catch (_: Throwable) {}
     }
 
     private fun requireConnected() {
         if (!connected || connection == null || bulkIn == null || bulkOut == null) {
-            throw IllegalStateException("Not connected — scan first")
+            throw IOException("Not connected — scan first")
         }
     }
 
@@ -381,71 +433,101 @@ class AdbUsb(private val context: Context) {
     }
 
     private fun writeBulk(data: ByteArray) {
+        val conn = connection ?: throw IOException("Device disconnected")
+        val out = bulkOut ?: throw IOException("Device disconnected")
         var off = 0
         while (off < data.size) {
-            val n = connection!!.bulkTransfer(bulkOut, data, off, data.size - off, 5000)
+            val n = conn.bulkTransfer(out, data, off, data.size - off, 5000)
             if (n <= 0) throw IOException("ADB bulk write failed")
             off += n
         }
     }
 
     private fun readBulk(buf: ByteArray, len: Int, timeout: Int) {
+        val conn = connection ?: throw IOException("Device disconnected")
+        val inp = bulkIn ?: throw IOException("Device disconnected")
         var off = 0
         while (off < len) {
-            val n = connection!!.bulkTransfer(bulkIn, buf, off, len - off, timeout)
+            val n = conn.bulkTransfer(inp, buf, off, len - off, timeout)
             if (n <= 0) throw IOException("ADB bulk read timed out")
             off += n
         }
     }
 
     // ------------------------------------------------------------------
-    // RSA auth
+    // RSA auth key storage
     // ------------------------------------------------------------------
 
-    private fun getOrCreateKeyPair(): KeyPair {
-        val prefs = context.getSharedPreferences("adb_auth_key", Context.MODE_PRIVATE)
-        val privB64 = prefs.getString("private", null)
-        val pubB64 = prefs.getString("public", null)
+    private fun securePrefs(): SharedPreferences {
+        val masterKey = MasterKey.Builder(context)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build()
+        return EncryptedSharedPreferences.create(
+            context,
+            "adb_auth_key_secure",
+            masterKey,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+        )
+    }
+
+    /** Move any legacy plaintext key into encrypted storage, then erase it. */
+    private fun migrateLegacyKey(secure: SharedPreferences) {
+        val legacy = context.getSharedPreferences("adb_auth_key", Context.MODE_PRIVATE)
+        val priv = legacy.getString("private", null)
+        val pub = legacy.getString("public", null)
+        if (priv != null && pub != null) {
+            secure.edit().putString("private", priv).putString("public", pub).apply()
+            legacy.edit().clear().apply()
+        }
+    }
+
+    private fun generateKeyPair(): KeyPair =
+        KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
+
+    private fun getOrCreateKeyPair(): KeyPair = try {
+        val secure = securePrefs()
+        migrateLegacyKey(secure)
+        val privB64 = secure.getString("private", null)
+        val pubB64 = secure.getString("public", null)
         if (privB64 != null && pubB64 != null) {
             val kf = KeyFactory.getInstance("RSA")
-            return KeyPair(
+            KeyPair(
                 kf.generatePublic(X509EncodedKeySpec(Base64.decode(pubB64, Base64.DEFAULT))),
-                kf.generatePrivate(PKCS8EncodedKeySpec(Base64.decode(privB64, Base64.DEFAULT)))
+                kf.generatePrivate(PKCS8EncodedKeySpec(Base64.decode(privB64, Base64.DEFAULT))),
             )
+        } else {
+            val kp = generateKeyPair()
+            secure.edit()
+                .putString("private", Base64.encodeToString(kp.private.encoded, Base64.DEFAULT))
+                .putString("public", Base64.encodeToString(kp.public.encoded, Base64.DEFAULT))
+                .apply()
+            kp
         }
-        val kpg = KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }
-        val kp = kpg.generateKeyPair()
-        prefs.edit()
-            .putString("private", Base64.encodeToString(kp.private.encoded, Base64.DEFAULT))
-            .putString("public", Base64.encodeToString(kp.public.encoded, Base64.DEFAULT))
-            .apply()
-        return kp
+    } catch (_: Throwable) {
+        // Keystore unavailable: use an ephemeral key for this process only.
+        // Never fall back to plaintext storage on disk.
+        ephemeralKey ?: generateKeyPair().also { ephemeralKey = it }
     }
 
     /** Sign the AUTH token like AOSP's RSA_sign(NID_sha1, token, 20, ...). */
-    private fun signToken(token: ByteArray): ByteArray? {
-        return try {
-            val kp = getOrCreateKeyPair()
-            val digestInfo = SHA1_PREFIX + token
-            val cipher = Cipher.getInstance("RSA/ECB/PKCS1Padding")
-            cipher.init(Cipher.ENCRYPT_MODE, kp.private)
-            cipher.doFinal(digestInfo)
-        } catch (e: Throwable) {
-            null
-        }
+    private fun signToken(token: ByteArray): ByteArray? = try {
+        val kp = getOrCreateKeyPair()
+        val cipher = Cipher.getInstance("RSA/ECB/PKCS1Padding")
+        cipher.init(Cipher.ENCRYPT_MODE, kp.private)
+        cipher.doFinal(SHA1_PREFIX + token)
+    } catch (_: Throwable) {
+        null
     }
 
     /** Build ADB's custom 524-byte RSAPublicKey blob from our RSA key. */
     private fun publicKeyBlob(): ByteArray {
-        val kp = getOrCreateKeyPair()
-        val pub = kp.public
-        val n = (pub as java.security.interfaces.RSAPublicKey).modulus
+        val pub = getOrCreateKeyPair().public as java.security.interfaces.RSAPublicKey
+        val n = pub.modulus
         val e = pub.publicExponent.toInt()
-
         val r32 = BigInteger.ONE.shiftLeft(32)
         val n0inv = r32.subtract(n.mod(r32).modInverse(r32)).mod(r32).toInt()
-        val rr = BigInteger.ONE.shiftLeft(MODULUS_BITS * 2).mod(n) // 2^4096 mod N
-
+        val rr = BigInteger.ONE.shiftLeft(MODULUS_BITS * 2).mod(n)
         val buf = ByteBuffer.allocate(524).order(ByteOrder.LITTLE_ENDIAN)
         buf.putInt(MODULUS_WORDS)
         buf.putInt(n0inv)
@@ -468,6 +550,7 @@ class AdbUsb(private val context: Context) {
 
     companion object {
         const val ACTION_USB_PERMISSION = "com.netherish.flashbridge.USB_PERMISSION_ADB"
+        private const val MAX_SHELL_PACKETS = 4096
 
         private const val A_CNXN = 0x4e584e43
         private const val A_AUTH = 0x48545541
@@ -492,14 +575,9 @@ class AdbUsb(private val context: Context) {
             0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05, 0x00, 0x04, 0x14
         )
 
-        fun isAdbDevice(device: UsbDevice): Boolean {
-            for (i in 0 until device.interfaceCount) {
-                val intf = device.getInterface(i)
-                if (intf.interfaceClass == 0xFF && intf.interfaceSubclass == 0x42 && intf.interfaceProtocol == 0x01) {
-                    return true
-                }
-            }
-            return false
+        fun isAdbDevice(device: UsbDevice): Boolean = (0 until device.interfaceCount).any { i ->
+            val intf = device.getInterface(i)
+            intf.interfaceClass == 0xFF && intf.interfaceSubclass == 0x42 && intf.interfaceProtocol == 0x01
         }
 
         private fun cmdName(cmd: Int): String = when (cmd) {
@@ -512,6 +590,14 @@ class AdbUsb(private val context: Context) {
             A_FAIL -> "FAIL"
             else -> "0x${Integer.toHexString(cmd)}"
         }
+
+        internal fun Intent.deviceExtra(): UsbDevice? =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                getParcelableExtra(UsbManager.EXTRA_DEVICE)
+            }
     }
 }
 

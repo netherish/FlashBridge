@@ -42,15 +42,15 @@ It speaks the **fastboot** and **ADB** protocols directly over Android's USB Hos
 
 ## Screenshots
 
-Real UI captures from the v1.6 build on an unrooted Android phone.
+Real UI captures from the v1.8 build on an unrooted Android phone.
 
 | Flash queue | Fastboot tools | ADB tools |
 |:---:|:---:|:---:|
 | <img src="assets/screenshots/01-flash.png" width="220" alt="Flash tab"> | <img src="assets/screenshots/02-fastboot.png" width="220" alt="Fastboot tab"> | <img src="assets/screenshots/03-adb.png" width="220" alt="ADB tab"> |
 
-| MediaTek detection | BYO DA / auth / raw memory | Console |
-|:---:|:---:|:---:|
-| <img src="assets/screenshots/04-mtk.png" width="220" alt="MTK tab"> | <img src="assets/screenshots/06-mtk-details.png" width="220" alt="MTK advanced tools"> | <img src="assets/screenshots/05-console.png" width="220" alt="Console tab"> |
+| Console |
+|:---:|
+| <img src="assets/screenshots/05-console.png" width="220" alt="Console tab"> |
 
 ---
 
@@ -79,9 +79,8 @@ Real UI captures from the v1.6 build on an unrooted Android phone.
 - 🔓 **No root, no binaries** — pure Kotlin implementation using the Android USB Host API
 - 🌐 Universal fastboot detection by USB interface class — works across vendors
 - 📊 Live transfer progress, device info panel, and full session log
-- 🎨 Tabbed Material 3 advanced interface (Flash / Fastboot / ADB / MTK / Console)
-- 📟 **MediaTek BROM/preloader support** — instant auto-detect, chipset/security readout, **bring-your-own DA** parsing (V3/V5/V6), user-supplied auth/cert upload, `SEND_DA` + `JUMP_DA`/`JUMP_DA64`, raw 32-bit memory read/write
-- 🧩 **No bundled binaries** — you supply the DA and auth files; FlashBridge recognises and uses them
+- 🎨 Tabbed Material 3 interface (Flash / Fastboot / ADB / Console) with animated tab and dialog transitions
+- 🧩 **No bundled binaries and no bundled firmware** — everything runs on the Android USB Host API
 
 ---
 
@@ -128,31 +127,10 @@ This is the same protocol `fastboot` on a PC uses — implemented natively in Ko
 
 Boot the target into custom recovery, choose **Apply update → Apply from ADB**, connect, press Detect, then **Sideload ZIP** on the Flash or ADB tab. The ZIP is streamed over the ADB `sideload:` service with live progress — exactly like `adb sideload` on a PC.
 
-### MediaTek (MTK) devices
-
-The **MTK tab** detects MediaTek devices in BROM or preloader mode (USB VID `0x0E8D`), performs the first-stage handshake, and reads:
-
-- HW code / HW version / HW subcode / SW version
-- Bootloader and BROM versions
-- Chipset name (MT6735, MT6765 Helio P35, Dimensity, …)
-- Target security config — SBC, SLA, DAA, certificate and auth flags
-
-To enter BROM: power off, hold **Volume Up + Power** (or Volume Down + Power), connect USB, then release. For preloader: power off and just connect USB.
-
-#### Bring your own DA (v1.6+)
-
-The MTK tab now goes beyond identification:
-
-1. **Choose a DA file** from your own storage. FlashBridge parses the documented 0x6C-byte header and DA entry table: protocol (Legacy V3 / XFlash V5 / XML V6), file ID, version, supported hardware codes, and each stage's offset, load address, size and signature length. It checks the DA against the connected chip's HW code and shows SHA-256.
-2. **Add your own authorization files** if the chip requires BROM SLA or DAA. They are sent with the standard `SEND_AUTH` (0xE2) / `SEND_CERT` (0xE0) commands.
-3. **Upload and jump** — the selected DA stage is sent with `SEND_DA` (0xD7) to its header-specified address, checksummed, then executed with `JUMP_DA` (0xD5) or `JUMP_DA64` (0xDE).
-4. **Raw memory tools** — `READ32` (0xD1) and `WRITE32` (0xD4) for advanced diagnosis once a DA is running.
-
-This is the same first-stage path PC tools use, implemented in pure Kotlin. FlashBridge **bundles no MediaTek binaries** and does **not implement exploit-based security bypasses** (kamakiri, carbonara, heapbait, etc.). Writing/formatting flash partitions is performed by commands inside the DA itself; support for those DA-level commands is not claimed here. Only use DA and auth files you are entitled to, for devices you own, and keep a backup.
 
 ### Limitations
 
-Standard fastboot and ADB devices are supported across vendors. Samsung (Odin/download mode) and Qualcomm 9008 (QFIL) use proprietary protocols that cannot be driven through fastboot/ADB. MediaTek partition writes need a compatible running DA. Bootloader unlock may additionally require OEM unlocking to be enabled, a Mi-account authorization (Xiaomi), or internet access depending on the vendor.
+Standard fastboot and ADB devices are supported across vendors. Samsung (Odin/download mode), Qualcomm 9008 (QFIL) and MediaTek BROM/preloader use proprietary protocols that are not supported. Bootloader unlock may additionally require OEM unlocking to be enabled, a Mi-account authorization (Xiaomi), or internet access depending on the vendor.
 
 ---
 
@@ -160,14 +138,19 @@ Standard fastboot and ADB devices are supported across vendors. Samsung (Odin/do
 
 You need JDK 17 and Android SDK (platform 36, build-tools 35/36).
 
+Two product flavors are produced:
+
+- `full` — all fastboot/ADB operations, with destructive ones behind an in-app Advanced switch. **This is the F-Droid / primary build.**
+- `play` — destructive/experimental operations compiled out (`BuildConfig.ADVANCED_FEATURES = false`). Kept for a restricted distribution; not required for F-Droid.
+
 ```powershell
-.\gradlew.bat assembleRelease
+.\gradlew.bat test assembleFullRelease
 ```
 
-The unsigned APK is at `app\build\outputs\apk\release\`. Sign it with `apksigner` before installing, or use the included `sign-and-install.ps1` (edit the keystore password first).
+The unsigned APK is at `app\build\outputs\apk\full\release\app-full-release-unsigned.apk`. F-Droid signs builds itself, so no local keystore is needed for submission. For local install, signing credentials come from `FB_KEYSTORE` / `FB_KEY_ALIAS` / `FB_STORE_PASS` / `FB_KEY_PASS` or an untracked `signing.properties`; the included `sign-and-install.ps1` reads the same values. Never commit a keystore.
 
 ---
 
 ## Ownership
 
-This is an original project by **[netherish](https://github.com/netherish)**. No open-source license is applied — all rights are reserved by the author. No GPL, no third-party license obligations, no attribution requirements. The implementation contains no third-party binaries or copied code — just original Kotlin using the Android SDK.
+This is an original project by **[netherish](https://github.com/netherish)**, released under the [MIT License](LICENSE). It contains no third-party binaries or copied code — just original Kotlin using the Android SDK and Apache-2.0 AndroidX/Compose libraries. F-Droid compatible.

@@ -1,27 +1,28 @@
 package com.netherish.flashbridge.ui
 
 import android.app.Application
+import android.content.Context
+import android.content.SharedPreferences
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.netherish.flashbridge.BuildConfig
 import com.netherish.flashbridge.core.AdbState
 import com.netherish.flashbridge.core.AdbUsb
 import com.netherish.flashbridge.core.FastbootUsb
 import com.netherish.flashbridge.core.FileUtils
-import com.netherish.flashbridge.core.MtkDa
-import com.netherish.flashbridge.core.MtkInfo
-import com.netherish.flashbridge.core.MtkState
-import com.netherish.flashbridge.core.MtkUsb
 import com.netherish.flashbridge.core.UsbInfo
 import com.netherish.flashbridge.core.UsbState
+import com.netherish.flashbridge.core.Validation
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
 
 enum class Busy { None, Running }
-enum class DeviceMode { NONE, FASTBOOT, ADB, RECOVERY, MTK }
+enum class DeviceMode { NONE, FASTBOOT, ADB, RECOVERY }
 
 data class FlashItem(
     val id: Long,
@@ -40,13 +41,14 @@ data class UiState(
     val deviceInfo: String = "",
     val terminal: String = "",
     val progress: String = "",
+    /** 0..100 while a transfer is running, -1 when there is no active transfer. */
+    val progressPercent: Int = -1,
     val lastResultOk: Boolean? = null,
-    val mtkInfo: MtkInfo? = null,
-    val mtkProgress: String = "",
-    val daFile: MtkDa.DaFile? = null,
-    val authFiles: List<MtkDa.AuthFile> = emptyList(),
     val queue: List<FlashItem> = emptyList(),
     val defaultPartition: String = "boot",
+    val confirmDestructive: Boolean = true,
+    val advancedUnlocked: Boolean = false,
+    val demoMode: Boolean = false,
     val selectedFile: String = "",
     val selectedUri: Uri? = null,
 )
@@ -55,22 +57,26 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val fastboot = FastbootUsb(app)
     private val adb = AdbUsb(app)
-    private val mtk = MtkUsb(app)
 
     val usbStatus: StateFlow<UsbState> = fastboot.status
     val adbStatus: StateFlow<AdbState> = adb.status
-    val mtkStatus: StateFlow<MtkState> = mtk.status
     val usbDevice: StateFlow<UsbInfo?> = fastboot.deviceInfo
     val adbDevice: StateFlow<UsbInfo?> = adb.deviceInfo
-    val mtkInfo: StateFlow<MtkInfo?> = mtk.info
-    val mtkProgress: StateFlow<String> = mtk.progress
 
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state
 
+    private val prefs: SharedPreferences =
+        app.getSharedPreferences("flashbridge_settings", Context.MODE_PRIVATE)
+
     private var nextId = 0L
+    private val scanning = AtomicBoolean(false)
 
     init {
+        _state.value = _state.value.copy(
+            defaultPartition = prefs.getString("default_partition", "boot") ?: "boot",
+            confirmDestructive = prefs.getBoolean("confirm_destructive", true),
+        )
         if (!fastboot.hasUsbHost()) append("⚠ This device has no USB host (OTG) support.")
 
         viewModelScope.launch {
@@ -79,6 +85,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     _state.value = _state.value.copy(deviceMode = DeviceMode.FASTBOOT)
                     append("✓ Fastboot device connected")
                     refreshDeviceInfo()
+                } else if (st is UsbState.Error) {
+                    append("⚠ USB: ${st.message}")
+                    _state.value = _state.value.copy(deviceMode = DeviceMode.NONE)
                 }
             }
         }
@@ -87,75 +96,68 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 if (st is AdbState.Connected) {
                     append("✓ ADB device connected")
                     refreshAdbInfo()
+                } else if (st is AdbState.Error) {
+                    append("⚠ ADB: ${st.message}")
+                    _state.value = _state.value.copy(deviceMode = DeviceMode.NONE)
                 }
-            }
-        }
-        viewModelScope.launch {
-            mtk.status.collect { st ->
-                when (st) {
-                    is MtkState.Connected -> {
-                        val i = st.info
-                        _state.value = _state.value.copy(
-                            deviceMode = DeviceMode.MTK,
-                            mtkInfo = i,
-                        )
-                        append("✓ MediaTek device: ${i.chipName}")
-                        append("HW code 0x%04X · HW ver 0x%04X · BROM ${i.bromVer}".format(i.hwCode, i.hwVer))
-                    }
-                    is MtkState.Arming -> append("Watching USB — plug in the MTK device / hold the volume key now")
-                    is MtkState.NeedPermission -> append("Approve the USB permission prompt for the MTK device")
-                    is MtkState.DaRunning -> append("✓ DA stage running on device")
-                    is MtkState.Error -> append("⚠ MTK: ${st.message}")
-                    else -> {}
-                }
-            }
-        }
-        viewModelScope.launch {
-            mtk.progress.collect { p ->
-                _state.value = _state.value.copy(mtkProgress = p)
-                if (p.isEmpty()) append("✓ MTK transfer complete")
             }
         }
     }
 
     // ---- Discovery -------------------------------------------------------
 
+    /** USB probing does blocking I/O, so it runs off the main thread. */
     fun scan() {
-        append("Scanning USB…")
-        fastboot.close()
-        adb.close()
-        mtk.close()
-        _state.value = _state.value.copy(
-            deviceMode = DeviceMode.NONE,
-            adbModel = "",
-            deviceInfo = "",
-            mtkInfo = null,
-        )
-
-        fastboot.scan()
-        when (fastboot.status.value) {
-            is UsbState.NeedPermission, is UsbState.Connected -> return
-            else -> adb.scan()
+        if (!scanning.compareAndSet(false, true)) {
+            append("Scan already in progress")
+            return
         }
-        when (adb.status.value) {
-            is AdbState.NeedPermission, is AdbState.Connected -> return
-            else -> mtk.scan()
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                if (_state.value.demoMode) {
+                    _state.value = _state.value.copy(demoMode = false)
+                    append("Demo mode closed")
+                }
+                append("Scanning USB…")
+                fastboot.close()
+                adb.close()
+                _state.value = _state.value.copy(
+                    deviceMode = DeviceMode.NONE,
+                    adbModel = "",
+                    deviceInfo = "",
+                    progress = "",
+                    progressPercent = -1,
+                )
+
+                fastboot.scan()
+                when (fastboot.status.value) {
+                    is UsbState.NeedPermission, is UsbState.Connected -> return@launch
+                    else -> adb.scan()
+                }
+                when (adb.status.value) {
+                    is AdbState.NeedPermission, is AdbState.Connected -> return@launch
+                    else -> append(
+                        (adb.status.value as? AdbState.NoDevice)?.message
+                            ?: (fastboot.status.value as? UsbState.NoDevice)?.message
+                            ?: "No fastboot or ADB device found — check the cable and device mode"
+                    )
+                }
+            } finally {
+                scanning.set(false)
+            }
         }
     }
 
     private fun refreshAdbInfo() {
         viewModelScope.launch {
             try {
+                // Deliberately do not collect serial numbers or other unique IDs.
                 val model = withContext(Dispatchers.IO) {
-                    listOf("ro.product.model", "ro.product.device", "ro.build.version.release", "ro.serialno")
+                    listOf("ro.product.model", "ro.product.device", "ro.build.version.release")
                         .joinToString(" | ") { p -> "$p=${adb.getprop(p)}" }
                 }
-                _state.value = _state.value.copy(
-                    deviceMode = DeviceMode.ADB,
-                    adbModel = model,
-                )
+                _state.value = _state.value.copy(deviceMode = DeviceMode.ADB, adbModel = model)
                 append("Device: $model")
-                // Recovery detection: sideload service is only present in recovery
                 val isRecovery = withContext(Dispatchers.IO) {
                     try { adb.shell("getprop ro.build.type").contains("recovery", true) } catch (_: Throwable) { false }
                 }
@@ -173,8 +175,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun refreshDeviceInfo() {
         viewModelScope.launch {
             try {
+                // No serial numbers: keep the log free of unique device identifiers.
                 val info = withContext(Dispatchers.IO) {
-                    listOf("product", "variant", "serialno", "unlocked", "state", "slot-count", "current-slot", "version-bootloader")
+                    listOf("product", "variant", "unlocked", "state", "slot-count", "current-slot")
                         .joinToString("\n") { v -> "$v: ${try { fastboot.getvar(v) } catch (_: Throwable) { "n/a" }}" }
                 }
                 _state.value = _state.value.copy(deviceInfo = info)
@@ -188,17 +191,27 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun addFiles(uris: List<Uri>) {
         val ctx = getApplication<Application>()
-        val added = uris.map { uri ->
+        val defaultPart = if (Validation.isValidPartition(_state.value.defaultPartition)) {
+            _state.value.defaultPartition
+        } else "boot"
+        val added = mutableListOf<FlashItem>()
+        uris.forEach { uri ->
             val name = FileUtils.name(ctx, uri)
-            FlashItem(nextId++, uri, name, _state.value.defaultPartition, FileUtils.size(ctx, uri))
+            val size = FileUtils.size(ctx, uri)
+            if (!Validation.isValidFileSize(size)) {
+                append("✗ Rejected ${Validation.logSafe(name)}: " +
+                    if (size <= 0) "empty or unknown size" else "over ${FileUtils.readable(Validation.MAX_FILE_SIZE)}")
+                return@forEach
+            }
+            added += FlashItem(nextId++, uri, name, defaultPart, size)
         }
+        if (added.isEmpty()) return
         _state.value = _state.value.copy(
             queue = _state.value.queue + added,
             selectedFile = added.lastOrNull()?.name ?: _state.value.selectedFile,
             selectedUri = added.lastOrNull()?.uri,
         )
-        added.forEach { append("Added: ${it.name} → ${it.partition}") }
-        // Compute checksums in the background
+        added.forEach { append("Added: ${Validation.logSafe(it.name)}") }
         viewModelScope.launch {
             added.forEach { item ->
                 try {
@@ -222,13 +235,65 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun setItemPartition(id: Long, value: String) {
+        val clean = value.trim()
         _state.value = _state.value.copy(
-            queue = _state.value.queue.map { if (it.id == id) it.copy(partition = value.trim()) else it }
+            queue = _state.value.queue.map { if (it.id == id) it.copy(partition = clean) else it }
         )
     }
 
     fun setDefaultPartition(value: String) {
-        _state.value = _state.value.copy(defaultPartition = value.trim())
+        val clean = value.trim()
+        _state.value = _state.value.copy(defaultPartition = clean)
+        prefs.edit().putString("default_partition", clean).apply()
+    }
+
+    fun setConfirmDestructive(value: Boolean) {
+        _state.value = _state.value.copy(confirmDestructive = value)
+        prefs.edit().putBoolean("confirm_destructive", value).apply()
+        append(if (value) "Safety confirmations enabled" else "Safety confirmations disabled")
+    }
+
+    /** Deliberate, session-only opt-in for destructive/experimental operations. */
+    fun toggleAdvanced() {
+        if (!BuildConfig.ADVANCED_FEATURES) {
+            append("Advanced operations are disabled in this build")
+            return
+        }
+        val next = !_state.value.advancedUnlocked
+        _state.value = _state.value.copy(advancedUnlocked = next)
+        append(if (next) {
+            "⚠ ADVANCED MODE ENABLED — destructive and experimental operations are available. Disable when finished."
+        } else "Advanced mode disabled")
+    }
+
+    private fun requireAdvanced(feature: String) {
+        if (!BuildConfig.ADVANCED_FEATURES) {
+            throw IllegalStateException("$feature is disabled in this build")
+        }
+        if (!_state.value.advancedUnlocked) {
+            throw IllegalStateException("Enable Advanced mode to $feature")
+        }
+    }
+
+    /** Sample device for documentation/screenshots. Never performs real actions. */
+    fun toggleDemo() {
+        if (_state.value.demoMode) {
+            _state.value = _state.value.copy(
+                demoMode = false, deviceMode = DeviceMode.NONE, deviceInfo = "", adbModel = ""
+            )
+            append("Demo mode closed")
+            return
+        }
+        _state.value = _state.value.copy(
+            demoMode = true,
+            deviceMode = DeviceMode.FASTBOOT,
+            deviceInfo = listOf(
+                "product: demo_device", "variant: demo_a", "unlocked: yes", "state: unlocked",
+                "slot-count: 2", "current-slot: a", "version-bootloader: 1.0-DEMO",
+            ).joinToString("\n"),
+            adbModel = "DEMO DEVICE (fastboot)",
+        )
+        append("DEMO MODE — sample device shown. All actions are disabled until demo mode is closed.")
     }
 
     fun clearQueue() {
@@ -240,28 +305,44 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun flashQueue() = action("flash queue") {
         val items = _state.value.queue
         if (items.isEmpty()) throw IllegalStateException("No images in queue")
+
+        val problems = mutableListOf<String>()
+        items.forEach { item ->
+            Validation.partitionError(item.partition)?.let { problems += "${item.name}: $it" }
+            if (item.size <= 0) problems += "${item.name}: unknown or invalid file size"
+            if (item.sha256.isBlank()) problems += "${item.name}: checksum not ready yet"
+        }
+        val duplicates = items.groupBy { it.partition }.filter { it.value.size > 1 }.keys
+        duplicates.forEach { problems += "duplicate partition: $it" }
+        if (problems.isNotEmpty()) throw IllegalStateException("Preflight failed: ${problems.joinToString("; ")}")
+
+        val total = items.sumOf { it.size }
+        append("Preflight OK — ${items.size} image(s), ${FileUtils.readable(total)}, partitions: " +
+            items.joinToString(", ") { it.partition })
         val ctx = getApplication<Application>()
         items.forEachIndexed { index, item ->
-            append("[${index + 1}/${items.size}] Flashing ${item.name} → ${item.partition}")
+            append("[${index + 1}/${items.size}] Flashing ${Validation.logSafe(item.name)} → ${item.partition}")
             ctx.contentResolver.openInputStream(item.uri)?.use { input ->
-                fastboot.flash(item.partition, input) { sent, total ->
-                    val pct = if (total > 0) (sent * 100 / total) else 0
-                    _state.value = _state.value.copy(progress = "${item.name}: $pct%")
+                fastboot.flash(item.partition, input) { sent, totalBytes ->
+                    val pct = if (totalBytes > 0) (sent * 100L / totalBytes).toInt().coerceIn(0, 100) else 0
+                    _state.value = _state.value.copy(progress = "${item.name}: $pct%", progressPercent = pct)
                 }
             } ?: throw IllegalStateException("Cannot open ${item.name}")
             append("✓ ${item.partition} flashed")
         }
-        _state.value = _state.value.copy(progress = "")
+        _state.value = _state.value.copy(progress = "", progressPercent = -1)
     }
 
     fun bootImage() = action("boot image") {
         val item = _state.value.queue.firstOrNull() ?: throw IllegalStateException("Add an image first")
+        if (item.size <= 0) throw IllegalStateException("Unknown image size")
         getApplication<Application>().contentResolver.openInputStream(item.uri)?.use { input ->
             fastboot.boot(input) { sent, total ->
-                _state.value = _state.value.copy(progress = "${(sent * 100 / total)}%")
+                val pct = if (total > 0) (sent * 100L / total).toInt().coerceIn(0, 100) else 0
+                _state.value = _state.value.copy(progress = "$pct%", progressPercent = pct)
             }
-        }
-        _state.value = _state.value.copy(progress = "")
+        } ?: throw IllegalStateException("Cannot open ${item.name}")
+        _state.value = _state.value.copy(progress = "", progressPercent = -1)
         append("✓ Boot image sent (temporary boot)")
     }
 
@@ -272,27 +353,32 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun erase(partition: String) = action("erase $partition") {
+        requireAdvanced("erase partitions")
+        Validation.partitionError(partition)?.let { throw IllegalStateException(it) }
         fastboot.erase(partition)
         append("✓ Erase complete")
     }
 
     fun format(partition: String) = action("format $partition") {
+        requireAdvanced("format partitions")
+        Validation.partitionError(partition)?.let { throw IllegalStateException(it) }
         fastboot.format(partition)
         append("✓ Format complete")
     }
 
     fun wipe() = action("wipe") {
+        requireAdvanced("wipe the device")
         fastboot.wipe()
         append("✓ Wipe complete")
     }
 
-    /** Format userdata — clears encryption state after a custom ROM flash. */
     fun formatData() = action("format:userdata") {
         fastboot.format("userdata")
         append("✓ Data formatted")
     }
 
     fun formatMetadata() = action("format:metadata") {
+        requireAdvanced("format metadata")
         fastboot.format("metadata")
         append("✓ Metadata formatted")
     }
@@ -302,7 +388,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         append("✓ Cache wiped")
     }
 
-    /** The full post-flash reset most custom ROMs require. */
     fun factoryReset() = action("factory reset") {
         val results = fastboot.factoryReset()
         results.forEach { append("  $it") }
@@ -310,21 +395,26 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun setActive(slot: String) = action("set_active $slot") {
+        requireAdvanced("change the active slot")
+        if (!Validation.isValidSlot(slot)) throw IllegalStateException("Invalid slot: $slot")
         fastboot.setActive(slot)
         append("✓ Active slot set to $slot")
     }
 
     fun flashingUnlock() = action("flashing unlock") {
+        requireAdvanced("unlock the bootloader")
         fastboot.flashingUnlock()
         append("✓ Unlock command sent")
     }
 
     fun flashingLock() = action("flashing lock") {
+        requireAdvanced("lock the bootloader")
         fastboot.flashingLock()
         append("✓ Lock command sent")
     }
 
     fun unlockCritical() = action("flashing unlock_critical") {
+        requireAdvanced("unlock critical partitions")
         fastboot.flashingUnlockCritical()
         append("✓ Critical unlock sent")
     }
@@ -344,13 +434,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         append("✓ Continue sent")
     }
 
-    fun fastbootRaw(cmd: String) = action(cmd) {
+    fun fastbootRaw(cmd: String) = action("raw fastboot command") {
+        requireAdvanced("send raw fastboot commands")
+        if (!Validation.isValidFastbootCommand(cmd)) throw IllegalStateException("Invalid command")
         val out = fastboot.raw(cmd)
         append(if (out.isNotEmpty()) out else "✓ OKAY")
         _state.value = _state.value.copy(terminal = out)
     }
 
-    fun oem(cmd: String) = action("oem $cmd") {
+    fun oem(cmd: String) = action("OEM command") {
+        requireAdvanced("send OEM commands")
+        if (!Validation.isValidFastbootCommand(cmd)) throw IllegalStateException("Invalid command")
         val out = fastboot.oem(cmd)
         append(if (out.isNotEmpty()) out else "✓ OKAY")
         _state.value = _state.value.copy(terminal = out)
@@ -358,7 +452,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- ADB actions -----------------------------------------------------
 
-    fun adbShell(command: String) = action("adb shell $command") {
+    fun adbShell(command: String) = action("adb shell") {
+        requireAdvanced("run arbitrary ADB shell commands")
+        if (!Validation.isValidShellCommand(command)) throw IllegalStateException("Invalid shell command")
         val out = withContext(Dispatchers.IO) { adb.shell(command, 30000) }
         append(out.ifEmpty { "(no output)" })
         _state.value = _state.value.copy(terminal = out)
@@ -366,165 +462,71 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun adbSideload() = action("adb sideload") {
         val item = _state.value.queue.firstOrNull() ?: throw IllegalStateException("Add a ZIP to sideload")
-        val size = if (item.size > 0) item.size else
-            FileUtils.size(getApplication(), item.uri)
+        val size = if (item.size > 0) item.size else FileUtils.size(getApplication(), item.uri)
+        if (!Validation.isValidFileSize(size)) throw IllegalStateException("Unknown or invalid file size")
         getApplication<Application>().contentResolver.openInputStream(item.uri)?.use { input ->
             withContext(Dispatchers.IO) {
                 adb.sideload(input, size) { sent, total ->
-                    _state.value = _state.value.copy(progress = "${item.name}: ${(sent * 100 / total)}%")
+                    val pct = if (total > 0) (sent * 100L / total).toInt().coerceIn(0, 100) else 0
+                    _state.value = _state.value.copy(progress = "${item.name}: $pct%", progressPercent = pct)
                 }
             }
         } ?: throw IllegalStateException("Cannot open ${item.name}")
-        _state.value = _state.value.copy(progress = "")
+        _state.value = _state.value.copy(progress = "", progressPercent = -1)
         append("✓ Sideload complete")
     }
 
     fun adbPush(remotePath: String) = action("adb push") {
         val item = _state.value.queue.firstOrNull() ?: throw IllegalStateException("Add a file to push")
         val size = if (item.size > 0) item.size else FileUtils.size(getApplication(), item.uri)
+        if (!Validation.isValidFileSize(size)) throw IllegalStateException("Unknown or invalid file size")
         val path = remotePath.ifBlank { "/sdcard/Download/${item.name}" }
+        if (!Validation.isValidRemotePath(path)) throw IllegalStateException("Invalid remote path")
         getApplication<Application>().contentResolver.openInputStream(item.uri)?.use { input ->
             withContext(Dispatchers.IO) {
                 adb.push(input, size, path) { sent, total ->
-                    _state.value = _state.value.copy(progress = "${(sent * 100 / total)}%")
+                    val pct = if (total > 0) (sent * 100L / total).toInt().coerceIn(0, 100) else 0
+                    _state.value = _state.value.copy(progress = "$pct%", progressPercent = pct)
                 }
             }
         } ?: throw IllegalStateException("Cannot open ${item.name}")
-        _state.value = _state.value.copy(progress = "")
+        _state.value = _state.value.copy(progress = "", progressPercent = -1)
         append("✓ Pushed to $path")
     }
 
     fun adbReboot(target: String) = action("adb reboot $target") {
+        if (target.length > 64) throw IllegalStateException("Invalid reboot target")
         adb.reboot(target)
-        append("✓ Reboot sent — device is going $target")
+        append("✓ Reboot sent — device is going ${target.ifEmpty { "system" }}")
         adb.close()
         _state.value = _state.value.copy(deviceMode = DeviceMode.NONE)
-    }
-
-    // ---- MediaTek DA / authorization -------------------------------------
-
-    /** Parse and recognise a user-supplied Download Agent file. */
-    fun loadDa(uri: Uri) = action("read DA file") {
-        val da = withContext(Dispatchers.IO) { MtkDa.parseDa(getApplication(), uri) }
-        _state.value = _state.value.copy(daFile = da)
-        append("✓ DA: ${da.name}")
-        append("  ${da.protocol.label} · ${da.fileId} · v${da.version}")
-        append("  Chipsets: ${da.entries.joinToString(", ") { "0x%04X".format(it.hwCode) }}")
-        val info = _state.value.mtkInfo
-        if (info != null) {
-            val match = da.supports(info.hwCode)
-            append(if (match) "  ✓ DA matches connected chip 0x%04X".format(info.hwCode)
-                   else "  ⚠ DA does NOT list connected chip 0x%04X".format(info.hwCode))
-        }
-        append("  SHA-256: ${da.sha256}")
-    }
-
-    fun clearDa() {
-        _state.value = _state.value.copy(daFile = null)
-        append("DA file cleared")
-    }
-
-    /** Add user-supplied BROM/CERT authorization files. */
-    fun loadAuth(uris: List<Uri>) = action("read auth files") {
-        val ctx = getApplication<Application>()
-        val files = withContext(Dispatchers.IO) {
-            uris.map { MtkDa.parseAuth(ctx, it) }
-        }
-        _state.value = _state.value.copy(authFiles = _state.value.authFiles + files)
-        files.forEach { append("✓ Auth: ${it.kind} — ${it.name} (${it.sha256.take(16)}…)") }
-    }
-
-    fun clearAuth() {
-        _state.value = _state.value.copy(authFiles = emptyList())
-        append("Authorization files cleared")
-    }
-
-    /**
-     * Upload one DA stage and jump to it. Everything outside the app — the
-     * DA, the auth files and the chipset match — is supplied or confirmed by
-     * the user.
-     */
-    fun bootDa(entryIndex: Int, regionIndex: Int, use64: Boolean) = action("boot DA stage") {
-        val da = _state.value.daFile ?: throw IllegalStateException("Add a DA file first")
-        val info = _state.value.mtkInfo ?: throw IllegalStateException("Detect an MTK device first")
-        val entry = da.entries.getOrNull(entryIndex)
-            ?: throw IllegalStateException("DA chipset entry not found")
-        if (entry.hwCode != 0 && entry.hwCode != info.hwCode) {
-            throw IllegalStateException(
-                "DA is for 0x%04X, device is 0x%04X".format(entry.hwCode, info.hwCode)
-            )
-        }
-        val region = entry.regions.getOrNull(regionIndex)
-            ?: throw IllegalStateException("DA region not found")
-        val ctx = getApplication<Application>()
-
-        _state.value.authFiles.forEach { auth ->
-            val data = withContext(Dispatchers.IO) {
-                ctx.contentResolver.openInputStream(auth.uri)?.use { it.readBytes() }
-                    ?: throw IllegalStateException("Cannot read ${auth.name}")
-            }
-            append("→ Sending ${auth.kind}: ${auth.name}")
-            withContext(Dispatchers.IO) {
-                if (auth.name.contains("cert", true) || auth.kind.contains("cert", true)) {
-                    mtk.sendCert(data)
-                } else {
-                    mtk.sendAuth(data)
-                }
-            }
-            append("✓ ${auth.name} accepted")
-        }
-
-        val stage = withContext(Dispatchers.IO) { MtkDa.readRegion(ctx, da.uri, region) }
-        append("→ Uploading DA stage to 0x%08X (%s bytes)".format(region.address, stage.size))
-        withContext(Dispatchers.IO) {
-            mtk.sendDa(stage, region.address, region.signatureLength)
-        }
-        append("✓ DA stage uploaded, jumping…")
-        withContext(Dispatchers.IO) {
-            if (use64) mtk.jumpDa64(region.address) else mtk.jumpDa(region.address)
-        }
-        append("✓ DA is running — the device is now under DA control")
-    }
-
-    /** Read raw 32-bit words from the device (hex address, decimal count). */
-    fun mtkRead32(addressHex: String, countText: String) = action("read32") {
-        val address = parseHex(addressHex)
-        val count = countText.trim().toIntOrNull()?.coerceIn(1, 1024)
-            ?: throw IllegalStateException("Count must be 1–1024")
-        val values = withContext(Dispatchers.IO) { mtk.read32(address, count) }
-        val out = values.mapIndexed { i, v -> "0x%08X: 0x%08X".format(address + i * 4, v) }
-            .joinToString("\n")
-        append(out)
-        _state.value = _state.value.copy(terminal = out)
-    }
-
-    fun mtkWrite32(addressHex: String, valuesHex: String) = action("write32") {
-        val address = parseHex(addressHex)
-        val values = valuesHex.split(Regex("[\\s,]+"))
-            .filter { it.isNotBlank() }
-            .map { parseHex(it) }
-        if (values.isEmpty()) throw IllegalStateException("Enter at least one hex value")
-        withContext(Dispatchers.IO) { mtk.write32(address, values) }
-        append("✓ Wrote ${values.size} word(s) at 0x%08X".format(address))
-    }
-
-    private fun parseHex(text: String): Int {
-        val clean = text.trim().removePrefix("0x").removePrefix("0X")
-        return clean.toIntOrNull(16) ?: throw IllegalStateException("Invalid hex value: $text")
     }
 
     // ---- Shared ----------------------------------------------------------
 
     private fun action(label: String, block: suspend () -> Unit) {
+        if (_state.value.demoMode) {
+            append("Demo mode — actions are disabled")
+            return
+        }
+        // Reject duplicate taps before any coroutine is launched.
+        if (_state.value.busy == Busy.Running) {
+            append("An operation is already running — ignoring duplicate request")
+            return
+        }
+        _state.value = _state.value.copy(busy = Busy.Running, lastResultOk = null)
+        append("$ $label")
         viewModelScope.launch {
-            _state.value = _state.value.copy(busy = Busy.Running, lastResultOk = null)
-            append("$ $label")
             try {
                 withContext(Dispatchers.IO) { block() }
-                _state.value = _state.value.copy(busy = Busy.None, lastResultOk = true)
+                _state.value = _state.value.copy(
+                    busy = Busy.None, lastResultOk = true, progress = "", progressPercent = -1
+                )
             } catch (e: Throwable) {
                 append("✗ ${e.message ?: "Failed"}")
-                _state.value = _state.value.copy(busy = Busy.None, lastResultOk = false, progress = "")
+                _state.value = _state.value.copy(
+                    busy = Busy.None, lastResultOk = false, progress = "", progressPercent = -1
+                )
             }
         }
     }
@@ -541,6 +543,5 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         super.onCleared()
         fastboot.dispose()
         adb.dispose()
-        mtk.dispose()
     }
 }

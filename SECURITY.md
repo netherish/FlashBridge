@@ -30,9 +30,9 @@ time for a fix before public disclosure.
 FlashBridge is a repair and firmware utility for devices you own or are
 authorised to modify. It deliberately:
 
-- bundles **no** vendor binaries, download agents, or exploit payloads
+- bundles **no** vendor binaries, firmware, or exploit payloads
 - does **not** implement security-bypass exploits
-- requires the user to supply any DA or authorization files themselves
+- requires the user to supply every image flashed
 - confirms destructive actions before running them
 
 Flashing incorrect images can permanently damage hardware. Always back up

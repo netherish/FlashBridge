@@ -28,7 +28,7 @@ body:
     id: target
     attributes:
       label: Target device
-      description: Make, model, and mode (fastboot / ADB / recovery / MTK BROM)
+      description: Make, model, and mode (fastboot / ADB / recovery)
       placeholder: "Device X / fastboot"
     validations:
       required: true

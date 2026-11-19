@@ -1,6 +1,13 @@
 package com.netherish.flashbridge.ui
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -12,6 +19,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -19,31 +27,73 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.netherish.flashbridge.BuildConfig
 import com.netherish.flashbridge.core.AdbState
 import com.netherish.flashbridge.core.FileUtils
-import com.netherish.flashbridge.core.MtkState
 import com.netherish.flashbridge.core.UsbState
 import com.netherish.flashbridge.ui.theme.*
+
+/** Exact description of a pending destructive operation. */
+private data class ConfirmRequest(
+    val title: String,
+    val details: String,
+    val critical: Boolean = false,
+    val token: String = "",
+    val action: () -> Unit,
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FlashBridgeScreen(
     vm: MainViewModel,
     onPickFiles: () -> Unit,
-    onPickDa: () -> Unit,
-    onPickAuth: () -> Unit,
+    onShareLog: (String) -> Unit,
 ) {
     val state by vm.state.collectAsState()
     val usbStatus by vm.usbStatus.collectAsState()
     val adbStatus by vm.adbStatus.collectAsState()
-    val mtkStatus by vm.mtkStatus.collectAsState()
 
     var tab by remember { mutableIntStateOf(0) }
-    var confirm by remember { mutableStateOf<Pair<String, () -> Unit>?>(null) }
+    var confirm by remember { mutableStateOf<ConfirmRequest?>(null) }
     var shellCmd by remember { mutableStateOf("getprop ro.product.model") }
     var pushPath by remember { mutableStateOf("") }
 
-    val busy = state.busy != Busy.None
+    val busy = state.busy != Busy.None || state.demoMode
+    val advancedAvailable = BuildConfig.ADVANCED_FEATURES
+    val requestConfirm: (ConfirmRequest) -> Unit = { confirm = it }
+
+    // Motion blur (Compose has no true per-frame blur): a light smear while
+    // scrolling, an animated blur on tab entry, and a heavier blurred backdrop
+    // while a destructive-action dialog is on screen.
+    val scroll = rememberScrollState()
+    val dialogBlurAnim = remember { Animatable(0f) }
+    LaunchedEffect(confirm != null) {
+        dialogBlurAnim.animateTo(
+            targetValue = if (confirm != null) 8f else 0f,
+            animationSpec = tween<Float>(180),
+        )
+    }
+    val scrollBlurAnim = remember { Animatable(0f) }
+    LaunchedEffect(scroll.isScrollInProgress) {
+        scrollBlurAnim.animateTo(
+            targetValue = if (scroll.isScrollInProgress) 2f else 0f,
+            animationSpec = tween<Float>(140),
+        )
+    }
+
+    // Included in every destructive-operation dialog so the user can verify
+    // that the operation is aimed at the device they actually connected.
+    val deviceLabel = when (state.deviceMode) {
+        DeviceMode.FASTBOOT -> {
+            val product = state.deviceInfo.lines().firstOrNull { it.startsWith("product:") }
+                ?.removePrefix("product:")?.trim().orEmpty()
+            if (product.isEmpty()) "Fastboot device" else "Fastboot device ($product)"
+        }
+        DeviceMode.ADB -> state.adbModel.lines().firstOrNull().orEmpty()
+            .ifEmpty { "ADB device" }.let { "ADB device ($it)" }
+        DeviceMode.RECOVERY -> "Recovery device"
+        DeviceMode.NONE -> "NO DEVICE DETECTED"
+    }
 
     Scaffold(
         topBar = {
@@ -54,10 +104,26 @@ fun FlashBridgeScreen(
                         Spacer(Modifier.width(8.dp))
                         Text("FlashBridge", fontWeight = FontWeight.Bold)
                         Spacer(Modifier.width(6.dp))
-                        Text("ADVANCED", color = Amber, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        Text(
+                            if (advancedAvailable) "ADVANCED" else "STANDARD",
+                            color = if (advancedAvailable) Amber else Success,
+                            fontSize = 10.sp, fontWeight = FontWeight.Bold,
+                        )
+                        if (state.demoMode) {
+                            Spacer(Modifier.width(8.dp))
+                            Text("DEMO", color = Error, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
                 },
                 actions = {
+                    IconButton(onClick = { vm.toggleDemo() }) {
+                        Icon(Icons.Filled.Visibility, contentDescription = "Toggle demo mode")
+                    }
+                    IconButton(onClick = {
+                        onShareLog(state.log + "\n\n--- TERMINAL ---\n" + state.terminal)
+                    }) {
+                        Icon(Icons.Filled.Share, contentDescription = "Share session log")
+                    }
                     IconButton(onClick = { vm.clearLog() }) {
                         Icon(Icons.Filled.DeleteSweep, contentDescription = "Clear log")
                     }
@@ -71,20 +137,16 @@ fun FlashBridgeScreen(
         },
         containerColor = DarkBg,
     ) { padding ->
-        Column(modifier = Modifier.padding(padding).fillMaxSize()) {
+        Column(modifier = Modifier.padding(padding).fillMaxSize().blur(dialogBlurAnim.value.dp)) {
             Column(
-                modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(16.dp),
+                modifier = Modifier.weight(1f).verticalScroll(scroll).padding(16.dp).blur(scrollBlurAnim.value.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
                 StatusCard(
                     mode = state.deviceMode,
                     usbStatus = usbStatus,
                     adbStatus = adbStatus,
-                    info = when (state.deviceMode) {
-                        DeviceMode.MTK -> state.mtkInfo?.chipName ?: ""
-                        else -> state.adbModel.ifEmpty { state.deviceInfo.lines().firstOrNull() ?: "" }
-                    },
-                    mtkStatus = mtkStatus,
+                    info = state.adbModel.ifEmpty { state.deviceInfo.lines().firstOrNull() ?: "" },
                 )
 
                 Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF3A2A00)), shape = RoundedCornerShape(14.dp)) {
@@ -92,9 +154,44 @@ fun FlashBridgeScreen(
                         Text("⚠", fontSize = 16.sp)
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            "Flashing firmware can permanently damage a device. Use the correct files for your exact model. You are responsible for what you flash.",
+                            "Flashing firmware can turn your phone into a very expensive paperweight. Use files for your exact model. " +
+                                "The app checks some things; it cannot save you from yourself.",
                             color = Warning, fontSize = 11.sp, lineHeight = 15.sp,
                         )
+                    }
+                }
+
+                // Normal vs advanced separation: the standard build has no
+                // destructive/experimental code compiled in at all.
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (state.advancedUnlocked) Color(0xFF4A1200) else Surface
+                    ),
+                    shape = RoundedCornerShape(14.dp),
+                ) {
+                    Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                if (advancedAvailable) "Advanced operations" else "Standard build",
+                                color = if (advancedAvailable) TextPrimary else Success,
+                                fontSize = 12.sp, fontWeight = FontWeight.Bold,
+                            )
+                            Text(
+                                if (advancedAvailable)
+                                    "Erase, unlock, wipe and raw commands are hidden until enabled."
+                                else
+                                    "This build omits destructive and experimental operations entirely.",
+                                color = TextMuted, fontSize = 10.sp, lineHeight = 14.sp,
+                            )
+                        }
+                        if (advancedAvailable) {
+                            Spacer(Modifier.width(8.dp))
+                            Switch(
+                                checked = state.advancedUnlocked,
+                                onCheckedChange = { vm.toggleAdvanced() },
+                                enabled = !state.demoMode,
+                            )
+                        }
                     }
                 }
 
@@ -106,7 +203,7 @@ fun FlashBridgeScreen(
                 ) {
                     Icon(Icons.Filled.Usb, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
-                    Text("Detect device", fontWeight = FontWeight.Bold)
+                    Text("Detect device — no mercy", fontWeight = FontWeight.Bold)
                 }
 
                 TabRow(
@@ -115,7 +212,7 @@ fun FlashBridgeScreen(
                     contentColor = Cyan,
                     divider = { HorizontalDivider(color = SurfaceHigh) },
                 ) {
-                    listOf("Flash", "Fastboot", "ADB", "MTK", "Console").forEachIndexed { i, title ->
+                    listOf("Flash", "Fastboot", "ADB", "Console").forEachIndexed { i, title ->
                         Tab(
                             selected = tab == i,
                             onClick = { tab = i },
@@ -126,19 +223,30 @@ fun FlashBridgeScreen(
                     }
                 }
 
-                when (tab) {
-                    0 -> FlashTab(state, vm, busy, onPickFiles) { title, action -> confirm = title to action }
-                    1 -> FastbootTab(state, vm, busy) { title, action -> confirm = title to action }
-                    2 -> AdbTab(state, vm, busy, shellCmd, { shellCmd = it },
-                        pushPath = pushPath, onPushPath = { pushPath = it })
-                    3 -> MtkTab(state, mtkStatus, vm, busy, onPickDa, onPickAuth) { title, action ->
-                        confirm = title to action
+                AnimatedContent(
+                    targetState = tab,
+                    transitionSpec = {
+                        fadeIn(animationSpec = tween(200)) togetherWith fadeOut(animationSpec = tween(120))
+                    },
+                    label = "tabTransition",
+                ) { targetTab ->
+                    val enterBlur = remember { Animatable(6f) }
+                    LaunchedEffect(Unit) {
+                        enterBlur.animateTo(0f, animationSpec = tween<Float>(240, easing = FastOutSlowInEasing))
                     }
-                    4 -> ConsoleTab(state)
+                    Column(Modifier.fillMaxWidth().blur(enterBlur.value.dp)) {
+                        when (targetTab) {
+                            0 -> FlashTab(state, vm, busy, advancedAvailable, onPickFiles, requestConfirm)
+                            1 -> FastbootTab(state, vm, busy, advancedAvailable, requestConfirm)
+                            2 -> AdbTab(state, vm, busy, advancedAvailable, shellCmd, { shellCmd = it },
+                                pushPath = pushPath, onPushPath = { pushPath = it }, confirm = requestConfirm)
+                            3 -> ConsoleTab(state)
+                        }
+                    }
                 }
 
                 Text(
-                    "Developed by netherish · v1.6 · All rights reserved",
+                    "Developed by netherish · v1.8 · MIT licensed",
                     color = TextMuted, fontSize = 11.sp,
                     modifier = Modifier.align(Alignment.CenterHorizontally).padding(bottom = 8.dp),
                 )
@@ -146,15 +254,37 @@ fun FlashBridgeScreen(
         }
     }
 
-    confirm?.let { (title, action) ->
+    confirm?.let { req ->
+        // No typing test — just a brutal, honest description of what is about
+        // to happen. Cancelling clears the request without running the action.
+        val lines = if (state.confirmDestructive) {
+            if (req.critical) listOf(
+                "Ah, bold of you to click this one.",
+                "This is the exact moment 'it'll probably be fine' meets reality.",
+                "No undo button. No take-backs. No support ticket for a brick.",
+            ) else listOf(
+                "You sure? The device is not going to ask twice.",
+                "Bricks do not come with a return receipt.",
+            )
+        } else listOf("This action cannot be undone.")
         AlertDialog(
             onDismissRequest = { confirm = null },
-            title = { Text(title) },
-            text = { Text("This is a destructive operation on the connected device. Continue?") },
-            confirmButton = {
-                TextButton(onClick = { confirm = null; action() }) { Text("CONFIRM", color = Error) }
+            title = { Text(req.title) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(req.details, fontSize = 12.sp, color = TextPrimary, fontWeight = FontWeight.Bold)
+                    Text("Target device: $deviceLabel", fontSize = 12.sp,
+                        color = if (state.deviceMode == DeviceMode.NONE) Error else Warning)
+                    Spacer(Modifier.height(4.dp))
+                    lines.forEach { Text("• $it", fontSize = 11.sp, color = Warning, lineHeight = 15.sp) }
+                }
             },
-            dismissButton = { TextButton(onClick = { confirm = null }) { Text("Cancel") } },
+            confirmButton = {
+                TextButton(onClick = { confirm = null; req.action() }, enabled = !busy) {
+                    Text(if (req.critical) "I KNOW WHAT I'M DOING" else "CONFIRM", color = Error)
+                }
+            },
+            dismissButton = { TextButton(onClick = { confirm = null }) { Text("Nope — bail out") } },
         )
     }
 }
@@ -166,13 +296,14 @@ private fun FlashTab(
     state: UiState,
     vm: MainViewModel,
     busy: Boolean,
+    advanced: Boolean,
     onPickFiles: () -> Unit,
-    confirm: (String, () -> Unit) -> Unit,
+    confirm: (ConfirmRequest) -> Unit,
 ) {
     val fastbootReady = state.deviceMode == DeviceMode.FASTBOOT
     val adbReady = state.deviceMode == DeviceMode.ADB || state.deviceMode == DeviceMode.RECOVERY
 
-    SectionTitle("Image queue")
+    SectionTitle("Image queue — choose your poison")
     Card(colors = CardDefaults.cardColors(containerColor = Surface), shape = RoundedCornerShape(16.dp)) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             OutlinedButton(
@@ -182,11 +313,11 @@ private fun FlashTab(
             ) {
                 Icon(Icons.Filled.FolderOpen, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
-                Text("Add image / ZIP files")
+                Text("Add image / ZIP files (the questionable ones)")
             }
 
             if (state.queue.isEmpty()) {
-                Text("No images added yet. Add .img, .zip or ROM files.", color = TextMuted, fontSize = 12.sp)
+                Text("No images yet. The brick count remains at zero. Add .img, .zip or ROM files.", color = TextMuted, fontSize = 12.sp)
             } else {
                 state.queue.forEach { item ->
                     Card(colors = CardDefaults.cardColors(containerColor = SurfaceHigh), shape = RoundedCornerShape(10.dp)) {
@@ -232,19 +363,44 @@ private fun FlashTab(
                     focusedTextColor = TextPrimary, unfocusedTextColor = TextPrimary,
                 ),
             )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Switch(
+                    checked = state.confirmDestructive,
+                    onCheckedChange = { vm.setConfirmDestructive(it) },
+                    enabled = !busy,
+                )
+                Spacer(Modifier.width(8.dp))
+                Text("Extra sass in warnings", color = TextPrimary, fontSize = 11.sp)
+            }
+            Text(
+                "Settings live on this phone and won't follow you to the next one. Confirmations always stay on.",
+                color = TextMuted, fontSize = 10.sp,
+            )
         }
     }
 
     if (state.progress.isNotEmpty()) {
         Text(state.progress, color = Cyan, fontWeight = FontWeight.Bold, fontSize = 12.sp)
-        LinearProgressIndicator(
-            progress = { (state.progress.substringAfterLast(' ').removeSuffix("%").toFloatOrNull() ?: 0f) / 100f },
-            modifier = Modifier.fillMaxWidth(), color = Amber,
-        )
+        if (state.progressPercent >= 0) {
+            LinearProgressIndicator(
+                progress = { state.progressPercent / 100f },
+                modifier = Modifier.fillMaxWidth(), color = Amber,
+            )
+        } else {
+            LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = Amber)
+        }
     }
 
     Button(
-        onClick = { vm.flashQueue() },
+        onClick = {
+            val summary = state.queue.joinToString(", ") { "${it.name} → ${it.partition} (${FileUtils.readable(it.size)})" }
+            confirm(ConfirmRequest(
+                title = "Flash ${state.queue.size} image(s)?",
+                details = "flash: $summary",
+                critical = true,
+                token = "FLASH",
+            ) { vm.flashQueue() })
+        },
         modifier = Modifier.fillMaxWidth().height(52.dp),
         enabled = fastbootReady && state.queue.isNotEmpty() && !busy,
         colors = ButtonDefaults.buttonColors(
@@ -259,21 +415,30 @@ private fun FlashTab(
     }
 
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        ActionButton("Boot image", Icons.Filled.PlayArrow, Modifier.weight(1f),
+        ActionButton("Boot once", Icons.Filled.PlayArrow, Modifier.weight(1f),
             fastbootReady && state.queue.isNotEmpty() && !busy) { vm.bootImage() }
         ActionButton("Sideload ZIP", Icons.Filled.SystemUpdate, Modifier.weight(1f),
-            adbReady && state.queue.isNotEmpty() && !busy) { vm.adbSideload() }
+            adbReady && state.queue.isNotEmpty() && !busy) { confirm(ConfirmRequest(
+                title = "Sideload ZIP?",
+                details = "adb sideload ${state.queue.firstOrNull()?.name ?: ""} — recovery will overwrite system partitions with whatever is in that ZIP",
+                critical = true, token = "SIDELOAD",
+            ) { vm.adbSideload() }) }
     }
 
-    SectionTitle("After flashing — factory reset")
+    SectionTitle("After flashing — factory reset (or enjoy the bootloop)")
     Card(colors = CardDefaults.cardColors(containerColor = Surface), shape = RoundedCornerShape(14.dp)) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
-                "Most custom ROMs need data wiped after flashing — otherwise you can bootloop or get stuck on encryption. Format data first.",
+                "Most custom ROMs demand a data wipe after flashing. Skip it and enjoy the bootloop / encryption screen forever. " +
+                    "The pretty recovery UI is not a guarantee.",
                 color = Warning, fontSize = 11.sp, lineHeight = 15.sp,
             )
             Button(
-                onClick = { confirm("Factory reset the device?") { vm.factoryReset() } },
+                onClick = { confirm(ConfirmRequest(
+                    title = "Factory reset the device?",
+                    details = "format:userdata + format:metadata + erase:cache — all user data will be erased",
+                    critical = true, token = "FACTORY RESET",
+                ) { vm.factoryReset() }) },
                 modifier = Modifier.fillMaxWidth().height(48.dp),
                 enabled = fastbootReady && !busy,
                 colors = ButtonDefaults.buttonColors(
@@ -290,7 +455,11 @@ private fun FlashTab(
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 ActionButton("Format data", Icons.Filled.FormatSize, Modifier.weight(1f),
-                    fastbootReady && !busy) { confirm("Format userdata?") { vm.formatData() } }
+                    fastbootReady && !busy) { confirm(ConfirmRequest(
+                        title = "Format userdata?",
+                        details = "fastboot format:userdata — all user data and encryption keys will be erased",
+                        critical = true, token = "FORMAT DATA",
+                    ) { vm.formatData() }) }
                 ActionButton("Wipe cache", Icons.Filled.DeleteSweep, Modifier.weight(1f),
                     fastbootReady && !busy) { vm.wipeCache() }
             }
@@ -319,7 +488,8 @@ private fun FastbootTab(
     state: UiState,
     vm: MainViewModel,
     busy: Boolean,
-    confirm: (String, () -> Unit) -> Unit,
+    advanced: Boolean,
+    confirm: (ConfirmRequest) -> Unit,
 ) {
     val ready = state.deviceMode == DeviceMode.FASTBOOT
 
@@ -327,7 +497,7 @@ private fun FastbootTab(
     Card(colors = CardDefaults.cardColors(containerColor = Surface), shape = RoundedCornerShape(14.dp)) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
-                state.deviceInfo.ifEmpty { "Press Detect, then Getvar all" },
+                state.deviceInfo.ifEmpty { "Press Detect first, then Getvar all. Devices are shy." },
                 color = if (state.deviceInfo.isEmpty()) TextMuted else Success,
                 fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 15.sp,
             )
@@ -339,77 +509,122 @@ private fun FastbootTab(
         }
     }
 
-    SectionTitle("Bootloader")
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        ActionButton("Unlock", Icons.Filled.LockOpen, Modifier.weight(1f), ready && !busy) {
-            confirm("Unlock bootloader?") { vm.flashingUnlock() }
-        }
-        ActionButton("Lock", Icons.Filled.Lock, Modifier.weight(1f), ready && !busy) {
-            confirm("Lock bootloader?") { vm.flashingLock() }
-        }
-    }
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        ActionButton("Unlock critical", Icons.Filled.EnhancedEncryption, Modifier.weight(1f), ready && !busy) {
-            confirm("Unlock critical partitions?") { vm.unlockCritical() }
-        }
-        ActionButton("Wipe", Icons.Filled.DeleteForever, Modifier.weight(1f), ready && !busy) {
-            confirm("Wipe device?") { vm.wipe() }
-        }
-    }
-
-    SectionTitle("Partitions")
     var partition by remember { mutableStateOf("boot") }
-    OutlinedTextField(
-        value = partition,
-        onValueChange = { partition = it },
-        label = { Text("Partition name") },
-        singleLine = true,
-        modifier = Modifier.fillMaxWidth(),
-        colors = OutlinedTextFieldDefaults.colors(
-            focusedBorderColor = Amber, unfocusedBorderColor = TextMuted,
-            focusedTextColor = TextPrimary, unfocusedTextColor = TextPrimary,
-        ),
-    )
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        ActionButton("Erase", Icons.Filled.Delete, Modifier.weight(1f), ready && !busy) {
-            confirm("Erase $partition?") { vm.erase(partition) }
-        }
-        ActionButton("Format", Icons.Filled.FormatSize, Modifier.weight(1f), ready && !busy) {
-            confirm("Format $partition?") { vm.format(partition) }
-        }
-    }
+    var raw by remember { mutableStateOf("getvar:product") }
 
-    SectionTitle("Active slot")
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        ActionButton("Slot A", Icons.Filled.LooksOne, Modifier.weight(1f), ready && !busy) { vm.setActive("a") }
-        ActionButton("Slot B", Icons.Filled.LooksTwo, Modifier.weight(1f), ready && !busy) { vm.setActive("b") }
-    }
-
-    SectionTitle("Reboot")
+    SectionTitle("Reboot — the safe buttons")
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         ActionButton("System", Icons.Filled.PowerSettingsNew, Modifier.weight(1f), ready && !busy) { vm.rebootFastboot() }
         ActionButton("Recovery", Icons.Filled.MedicalServices, Modifier.weight(1f), ready && !busy) { vm.rebootRecovery() }
         ActionButton("Continue", Icons.Filled.SkipNext, Modifier.weight(1f), ready && !busy) { vm.continueBoot() }
     }
 
-    SectionTitle("Raw commands")
-    var raw by remember { mutableStateOf("getvar:product") }
-    OutlinedTextField(
-        value = raw,
-        onValueChange = { raw = it },
-        label = { Text("Fastboot command") },
-        placeholder = { Text("getvar:product, erase:cache, oem …") },
-        singleLine = true,
-        modifier = Modifier.fillMaxWidth(),
-        colors = OutlinedTextFieldDefaults.colors(
-            focusedBorderColor = Amber, unfocusedBorderColor = TextMuted,
-            focusedTextColor = TextPrimary, unfocusedTextColor = TextPrimary,
-        ),
-    )
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        ActionButton("Send raw", Icons.Filled.Send, Modifier.weight(1f), ready && !busy) { vm.fastbootRaw(raw) }
-        ActionButton("OEM cmd", Icons.Filled.Build, Modifier.weight(1f), ready && !busy) {
-            vm.oem(raw.removePrefix("oem ").trim())
+    SectionTitle("The fun part — advanced only")
+    if (!advanced) {
+        Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF0E2A16)), shape = RoundedCornerShape(14.dp)) {
+            Text(
+                "Standard build: unlock, erase, format, slot-swap and raw commands are not in this binary. " +
+                    "Your device thanks you. Grab the full build if you enjoy living dangerously.",
+                color = Success, fontSize = 11.sp, lineHeight = 15.sp, modifier = Modifier.padding(14.dp),
+            )
+        }
+    } else if (!state.advancedUnlocked) {
+        Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF3A2A00)), shape = RoundedCornerShape(14.dp)) {
+            Text(
+                "Locked on purpose. Flip the Advanced switch up top if you want to see the buttons that can ruin your day.",
+                color = Warning, fontSize = 11.sp, lineHeight = 15.sp, modifier = Modifier.padding(14.dp),
+            )
+        }
+    } else {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ActionButton("Unlock", Icons.Filled.LockOpen, Modifier.weight(1f), ready && !busy) {
+                confirm(ConfirmRequest(
+                    "Unlock bootloader?", "fastboot flashing unlock — wipes user data and breaks the chain of trust",
+                    true, "UNLOCK") { vm.flashingUnlock() })
+            }
+            ActionButton("Lock", Icons.Filled.Lock, Modifier.weight(1f), ready && !busy) {
+                confirm(ConfirmRequest(
+                    "Lock bootloader?", "fastboot flashing lock — bricking is very much on the menu if the ROM is not stock",
+                    true, "LOCK") { vm.flashingLock() })
+            }
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ActionButton("Unlock critical", Icons.Filled.EnhancedEncryption, Modifier.weight(1f), ready && !busy) {
+                confirm(ConfirmRequest(
+                    "Unlock critical partitions?", "fastboot flashing unlock_critical — crosses another safety line",
+                    true, "UNLOCK CRITICAL") { vm.unlockCritical() })
+            }
+            ActionButton("Wipe", Icons.Filled.DeleteForever, Modifier.weight(1f), ready && !busy) {
+                confirm(ConfirmRequest(
+                    "Wipe device?", "fastboot wipe — everything goes bye-bye",
+                    true, "WIPE") { vm.wipe() })
+            }
+        }
+
+        SectionTitle("Partitions — touch at your own risk")
+        OutlinedTextField(
+            value = partition,
+            onValueChange = { partition = it },
+            label = { Text("Partition name") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = Amber, unfocusedBorderColor = TextMuted,
+                focusedTextColor = TextPrimary, unfocusedTextColor = TextPrimary,
+            ),
+        )
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ActionButton("Erase", Icons.Filled.Delete, Modifier.weight(1f), ready && !busy) {
+                confirm(ConfirmRequest(
+                    "Erase $partition?", "fastboot erase:$partition — gone, not coming back",
+                    true, "ERASE") { vm.erase(partition) })
+            }
+            ActionButton("Format", Icons.Filled.FormatSize, Modifier.weight(1f), ready && !busy) {
+                confirm(ConfirmRequest(
+                    "Format $partition?", "fastboot format:$partition — rebuilds the filesystem from scratch",
+                    true, "FORMAT") { vm.format(partition) })
+            }
+        }
+
+        SectionTitle("Active slot")
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ActionButton("Slot A", Icons.Filled.LooksOne, Modifier.weight(1f), ready && !busy) {
+                confirm(ConfirmRequest(
+                    "Switch active slot to A?", "fastboot set_active:a — next boot may not be the one you expect",
+                    false, "SLOT A") { vm.setActive("a") })
+            }
+            ActionButton("Slot B", Icons.Filled.LooksTwo, Modifier.weight(1f), ready && !busy) {
+                confirm(ConfirmRequest(
+                    "Switch active slot to B?", "fastboot set_active:b — next boot may not be the one you expect",
+                    false, "SLOT B") { vm.setActive("b") })
+            }
+        }
+
+        SectionTitle("Raw commands — for people who read the docs")
+        OutlinedTextField(
+            value = raw,
+            onValueChange = { raw = it },
+            label = { Text("Fastboot command") },
+            placeholder = { Text("getvar:product, erase:cache, oem …") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = Amber, unfocusedBorderColor = TextMuted,
+                focusedTextColor = TextPrimary, unfocusedTextColor = TextPrimary,
+            ),
+        )
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ActionButton("Send raw", Icons.Filled.Send, Modifier.weight(1f), ready && !busy) {
+                confirm(ConfirmRequest(
+                    "Send raw fastboot command?", "fastboot $raw — yes, this really sends that exact string",
+                    true, "RAW") { vm.fastbootRaw(raw) })
+            }
+            ActionButton("OEM cmd", Icons.Filled.Build, Modifier.weight(1f), ready && !busy) {
+                val cmd = raw.removePrefix("oem ").trim()
+                confirm(ConfirmRequest(
+                    "Send OEM command?", "fastboot oem $cmd — vendor territory, no guardrails here",
+                    true, "OEM") { vm.oem(cmd) })
+            }
         }
     }
 }
@@ -421,46 +636,62 @@ private fun AdbTab(
     state: UiState,
     vm: MainViewModel,
     busy: Boolean,
+    advanced: Boolean,
     shellCmd: String,
     onShellCmd: (String) -> Unit,
     pushPath: String,
     onPushPath: (String) -> Unit,
+    confirm: (ConfirmRequest) -> Unit,
 ) {
     val adbReady = state.deviceMode == DeviceMode.ADB || state.deviceMode == DeviceMode.RECOVERY
 
     SectionTitle("Device")
     Card(colors = CardDefaults.cardColors(containerColor = Surface), shape = RoundedCornerShape(14.dp)) {
         Text(
-            state.adbModel.ifEmpty { "Connect a device with USB debugging enabled, then press Detect." },
+            state.adbModel.ifEmpty { "Connect a device with USB debugging enabled, then press Detect. Yes, the toggle is in Developer options." },
             color = if (state.adbModel.isEmpty()) TextMuted else Success,
             fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 15.sp,
             modifier = Modifier.padding(14.dp),
         )
     }
 
-    SectionTitle("Shell")
-    OutlinedTextField(
-        value = shellCmd,
-        onValueChange = onShellCmd,
-        label = { Text("Shell command") },
-        placeholder = { Text("getprop ro.product.model") },
-        singleLine = true,
-        modifier = Modifier.fillMaxWidth(),
-        colors = OutlinedTextFieldDefaults.colors(
-            focusedBorderColor = Amber, unfocusedBorderColor = TextMuted,
-            focusedTextColor = TextPrimary, unfocusedTextColor = TextPrimary,
-        ),
-    )
-    Button(onClick = { vm.adbShell(shellCmd) }, enabled = adbReady && !busy, modifier = Modifier.fillMaxWidth()) {
-        Icon(Icons.Filled.Terminal, contentDescription = null)
-        Spacer(Modifier.width(8.dp))
-        Text("Run shell command")
+    SectionTitle("Shell — advanced only")
+    if (!advanced || !state.advancedUnlocked) {
+        Card(colors = CardDefaults.cardColors(containerColor = Surface), shape = RoundedCornerShape(14.dp)) {
+            Text(
+                if (!advanced) "Standard build: arbitrary shell is not compiled in. Your device's files stay where they are."
+                else "Arbitrary shell is locked. Flip Advanced up top if you want a rootless command prompt with absolutely no safety net.",
+                color = TextMuted, fontSize = 11.sp, lineHeight = 15.sp, modifier = Modifier.padding(14.dp),
+            )
+        }
+    } else {
+        OutlinedTextField(
+            value = shellCmd,
+            onValueChange = onShellCmd,
+            label = { Text("Shell command") },
+            placeholder = { Text("getprop ro.product.model") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = Amber, unfocusedBorderColor = TextMuted,
+                focusedTextColor = TextPrimary, unfocusedTextColor = TextPrimary,
+            ),
+        )
+        Button(onClick = { vm.adbShell(shellCmd) }, enabled = adbReady && !busy, modifier = Modifier.fillMaxWidth()) {
+            Icon(Icons.Filled.Terminal, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text("Run shell command — no hand-holding")
+        }
     }
 
     SectionTitle("Sideload / Push")
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         ActionButton("Sideload ZIP", Icons.Filled.SystemUpdate, Modifier.weight(1f),
-            adbReady && state.queue.isNotEmpty() && !busy) { vm.adbSideload() }
+            adbReady && state.queue.isNotEmpty() && !busy) { confirm(ConfirmRequest(
+                title = "Sideload ZIP?",
+                details = "adb sideload ${state.queue.firstOrNull()?.name ?: ""} — recovery will overwrite system partitions with whatever is in that ZIP",
+                critical = true, token = "SIDELOAD",
+            ) { vm.adbSideload() }) }
         ActionButton("Boot → Fastboot", Icons.Filled.RestartAlt, Modifier.weight(1f),
             adbReady && !busy) { vm.adbReboot("bootloader") }
     }
@@ -476,7 +707,13 @@ private fun AdbTab(
             focusedTextColor = TextPrimary, unfocusedTextColor = TextPrimary,
         ),
     )
-    Button(onClick = { vm.adbPush(pushPath) }, enabled = adbReady && state.queue.isNotEmpty() && !busy,
+    Button(onClick = {
+        val path = pushPath.ifBlank { "/sdcard/Download/${state.queue.firstOrNull()?.name ?: "file"}" }
+        confirm(ConfirmRequest(
+            "Push file to device?", "adb push → $path — existing files get overwritten without a polite warning",
+            false, "PUSH",
+        ) { vm.adbPush(pushPath) })
+    }, enabled = adbReady && state.queue.isNotEmpty() && !busy,
         modifier = Modifier.fillMaxWidth()) {
         Icon(Icons.Filled.FileUpload, contentDescription = null)
         Spacer(Modifier.width(8.dp))
@@ -492,234 +729,6 @@ private fun AdbTab(
     }
 }
 
-// ---- MTK tab -------------------------------------------------------------
-
-@Composable
-private fun MtkTab(
-    state: UiState,
-    mtkStatus: MtkState,
-    vm: MainViewModel,
-    busy: Boolean,
-    onPickDa: () -> Unit,
-    onPickAuth: () -> Unit,
-    confirm: (String, () -> Unit) -> Unit,
-) {
-    val info = state.mtkInfo
-    val da = state.daFile
-    var entryIndex by remember { mutableIntStateOf(0) }
-    var regionIndex by remember { mutableIntStateOf(0) }
-    var use64 by remember { mutableStateOf(true) }
-    var address by remember { mutableStateOf("") }
-    var count by remember { mutableStateOf("1") }
-    var values by remember { mutableStateOf("") }
-
-    SectionTitle("MediaTek device")
-    Card(colors = CardDefaults.cardColors(containerColor = Surface), shape = RoundedCornerShape(14.dp)) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            if (info != null) {
-                val rows = listOf(
-                    "Chipset" to info.chipName,
-                    "HW code" to "0x%04X".format(info.hwCode),
-                    "HW version" to "0x%04X".format(info.hwVer),
-                    "HW subcode" to "0x%04X".format(info.hwSubCode),
-                    "SW version" to "0x%04X".format(info.swVer),
-                    "BL version" to if (info.blVer >= 0) "0x%02X".format(info.blVer) else "n/a",
-                    "BROM version" to if (info.bromVer >= 0) "0x%02X".format(info.bromVer) else "n/a",
-                    "Mode" to if (mtkStatus is MtkState.DaRunning) "DA running" else if (info.isBrom) "BROM" else "Preloader",
-                    "USB VID/PID" to "0x%04X:0x%04X".format(info.usb.vendorId, info.usb.productId),
-                )
-                rows.forEach { (k, v) ->
-                    Row(Modifier.fillMaxWidth()) {
-                        Text(k, color = TextMuted, fontSize = 11.sp, modifier = Modifier.weight(1f))
-                        Text(v, color = TextPrimary, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-                    }
-                }
-            } else {
-                val arming = mtkStatus is MtkState.Arming
-                val msg = when (mtkStatus) {
-                    is MtkState.Arming ->
-                        "Watching USB… power the phone off, hold Volume Up (or Volume Down) + Power, then plug in the cable. It will be detected automatically the moment it enters BROM."
-                    is MtkState.NoDevice -> mtkStatus.message
-                    is MtkState.Error -> mtkStatus.message
-                    is MtkState.NeedPermission -> "Approve the USB permission prompt now"
-                    else -> "Press Detect, then power off the phone, hold Volume Up or Volume Down and connect USB."
-                }
-                if (arming) {
-                    CircularProgressIndicator(Modifier.size(20.dp), color = Cyan, strokeWidth = 2.dp)
-                    Spacer(Modifier.height(8.dp))
-                }
-                Text(msg, color = if (arming) Cyan else TextMuted, fontSize = 12.sp)
-            }
-            if (state.mtkProgress.isNotEmpty()) {
-                Text(state.mtkProgress, color = Cyan, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-            }
-        }
-    }
-
-    if (info != null) {
-        SectionTitle("Security configuration")
-        Card(colors = CardDefaults.cardColors(containerColor = Surface), shape = RoundedCornerShape(14.dp)) {
-            Text(info.security, color = Warning, fontFamily = FontFamily.Monospace, fontSize = 11.sp,
-                modifier = Modifier.padding(14.dp))
-        }
-    }
-
-    SectionTitle("1 · Download Agent (you supply it)")
-    Card(colors = CardDefaults.cardColors(containerColor = Surface), shape = RoundedCornerShape(14.dp)) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(
-                "Pick your own chipset-matched DA file. FlashBridge reads its header and recognises the protocol, chipsets and stages — no DA is bundled.",
-                color = TextMuted, fontSize = 11.sp, lineHeight = 15.sp,
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                SmallButton("Choose DA", Modifier.weight(1f), !busy) { onPickDa() }
-                if (da != null) SmallButton("Clear", Modifier.weight(0.5f), !busy) { vm.clearDa() }
-            }
-            if (da != null) {
-                val match = info?.let { da.supports(it.hwCode) }
-                val rows = listOf(
-                    "File" to da.name,
-                    "Size" to FileUtils.readable(da.size),
-                    "Protocol" to da.protocol.label,
-                    "File ID" to da.fileId,
-                    "Version" to da.version.toString(),
-                    "SoC entries" to da.entries.size.toString(),
-                    "SHA-256" to da.sha256.take(24) + "…",
-                    "Chip match" to when (match) {
-                        null -> "detect a device first"
-                        true -> "✓ matches 0x%04X".format(info!!.hwCode)
-                        false -> "⚠ DA does not list 0x%04X".format(info!!.hwCode)
-                    },
-                )
-                rows.forEach { (k, v) ->
-                    Row(Modifier.fillMaxWidth()) {
-                        Text(k, color = TextMuted, fontSize = 11.sp, modifier = Modifier.weight(1f))
-                        Text(v, color = if (k == "Chip match" && match == false) Error else TextPrimary,
-                            fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-                    }
-                }
-                if (da.entries.size > 1) {
-                    Text("SoC entry: $entryIndex · HW 0x%04X".format(da.entries[entryIndex.coerceIn(da.entries.indices)].hwCode),
-                        color = TextMuted, fontSize = 11.sp)
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        SmallButton("◀", Modifier.weight(1f), entryIndex > 0) { entryIndex-- }
-                        SmallButton("▶", Modifier.weight(1f), entryIndex < da.entries.size - 1) { entryIndex++ }
-                    }
-                }
-                val entry = da.entries[entryIndex.coerceIn(da.entries.indices)]
-                if (entry.regions.isNotEmpty()) {
-                    val region = entry.regions[regionIndex.coerceIn(entry.regions.indices)]
-                    Text(
-                        "Stage ${regionIndex + 1}/${entry.regions.size} · offset 0x%X · load 0x%08X · %s".format(
-                            region.offset, region.address, FileUtils.readable(region.length.toLong())),
-                        color = TextPrimary, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        SmallButton("◀ stage", Modifier.weight(1f), regionIndex > 0) { regionIndex-- }
-                        SmallButton("stage ▶", Modifier.weight(1f), regionIndex < entry.regions.size - 1) { regionIndex++ }
-                    }
-                }
-            }
-        }
-    }
-
-    SectionTitle("2 · Authorization files (you supply them)")
-    Card(colors = CardDefaults.cardColors(containerColor = Surface), shape = RoundedCornerShape(14.dp)) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(
-                "If the chip requires SLA/DAA/certificate authorization, add your own valid auth files. They are sent with the standard BROM auth commands — nothing is bypassed or generated by this app.",
-                color = TextMuted, fontSize = 11.sp, lineHeight = 15.sp,
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                SmallButton("Add auth files", Modifier.weight(1f), !busy) { onPickAuth() }
-                if (state.authFiles.isNotEmpty()) SmallButton("Clear", Modifier.weight(0.5f), !busy) { vm.clearAuth() }
-            }
-            state.authFiles.forEach { auth ->
-                Row(Modifier.fillMaxWidth()) {
-                    Text("${auth.kind}: ${auth.name}", color = TextPrimary, fontSize = 11.sp,
-                        modifier = Modifier.weight(1f))
-                    Text(auth.sha256.take(10), color = TextMuted, fontSize = 10.sp,
-                        fontFamily = FontFamily.Monospace)
-                }
-            }
-            if (state.authFiles.isEmpty()) Text("No auth files added", color = TextMuted, fontSize = 11.sp)
-        }
-    }
-
-    SectionTitle("3 · Boot DA stage")
-    Card(colors = CardDefaults.cardColors(containerColor = SurfaceHigh), shape = RoundedCornerShape(14.dp)) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(checked = use64, onCheckedChange = { use64 = it }, enabled = !busy)
-                Text("64-bit DA (JUMP_DA64)", color = TextPrimary, fontSize = 11.sp)
-            }
-            Button(
-                onClick = {
-                    confirm("Upload and execute this DA stage on the connected device?") {
-                        vm.bootDa(entryIndex, regionIndex, use64)
-                    }
-                },
-                modifier = Modifier.fillMaxWidth().height(46.dp),
-                enabled = info != null && da != null && da.entries.isNotEmpty() && !busy,
-                colors = ButtonDefaults.buttonColors(containerColor = Cyan, contentColor = Color(0xFF00363D),
-                    disabledContainerColor = Surface, disabledContentColor = TextMuted),
-                shape = RoundedCornerShape(12.dp),
-            ) {
-                Icon(Icons.Filled.Memory, contentDescription = null)
-                Spacer(Modifier.width(8.dp))
-                Text("UPLOAD + JUMP DA", fontWeight = FontWeight.Bold, fontSize = 12.sp)
-            }
-            Text(
-                "This runs the DA you chose on your device. Wrong DA or auth files can hard-brick it. Continue only with files for your exact chipset.",
-                color = Warning, fontSize = 11.sp, lineHeight = 15.sp,
-            )
-        }
-    }
-
-    SectionTitle("4 · Raw memory access (advanced)")
-    Card(colors = CardDefaults.cardColors(containerColor = Surface), shape = RoundedCornerShape(14.dp)) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(address, { address = it }, label = { Text("Address (hex)") },
-                singleLine = true, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(count, { count = it }, label = { Text("Word count") },
-                singleLine = true, modifier = Modifier.fillMaxWidth())
-            SmallButton("Read 32-bit", Modifier.fillMaxWidth(), info != null && !busy) {
-                vm.mtkRead32(address, count)
-            }
-            OutlinedTextField(values, { values = it }, label = { Text("Values (hex, space separated)") },
-                modifier = Modifier.fillMaxWidth())
-            SmallButton("Write 32-bit", Modifier.fillMaxWidth(), info != null && !busy) {
-                vm.mtkWrite32(address, values)
-            }
-        }
-    }
-
-    SectionTitle("Enter MediaTek download mode")
-    Card(colors = CardDefaults.cardColors(containerColor = SurfaceHigh), shape = RoundedCornerShape(14.dp)) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text("• BROM: power off, hold Volume Up + Power (or Volume Down + Power), connect USB, then release.",
-                color = TextPrimary, fontSize = 11.sp)
-            Text("• Preloader: power off, connect USB with no buttons held.",
-                color = TextPrimary, fontSize = 11.sp)
-            Text("• If the port disconnects after a few seconds, hold the button through the whole Detect step.",
-                color = TextMuted, fontSize = 11.sp)
-        }
-    }
-
-    Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF3A2A00)), shape = RoundedCornerShape(14.dp)) {
-        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.Top) {
-            Text("⛔", fontSize = 16.sp)
-            Spacer(Modifier.width(8.dp))
-            Text(
-                "Bring your own DA and authorization files. FlashBridge recognises them and drives the standard upload/jump path in pure Kotlin. " +
-                    "It does not bundle MediaTek binaries and does not implement exploit-based security bypasses. " +
-                    "Partition-level flashing (write/format) is only possible once a compatible DA is running; always verify the chip match and keep backups.",
-                color = Warning, fontSize = 11.sp, lineHeight = 15.sp,
-            )
-        }
-    }
-}
-
 // ---- Console tab ---------------------------------------------------------
 
 @Composable
@@ -727,7 +736,7 @@ private fun ConsoleTab(state: UiState) {
     SectionTitle("Command output")
     Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF05070E)), shape = RoundedCornerShape(14.dp)) {
         Text(
-            state.terminal.ifEmpty { "(no command output)" },
+            state.terminal.ifEmpty { "(silent — unlike the mistakes in the session log)" },
             color = Success, fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 15.sp,
             modifier = Modifier.padding(14.dp).fillMaxWidth(),
         )
@@ -735,7 +744,7 @@ private fun ConsoleTab(state: UiState) {
     SectionTitle("Session log")
     Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF05070E)), shape = RoundedCornerShape(14.dp)) {
         Text(
-            state.log.ifEmpty { "(empty)" },
+            state.log.ifEmpty { "(empty — suspiciously well-behaved so far)" },
             color = Cyan, fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 15.sp,
             modifier = Modifier.padding(14.dp).fillMaxWidth(),
         )
@@ -749,24 +758,19 @@ private fun StatusCard(
     mode: DeviceMode,
     usbStatus: UsbState,
     adbStatus: AdbState,
-    mtkStatus: MtkState,
     info: String,
 ) {
     val (color, title) = when (mode) {
-        DeviceMode.FASTBOOT -> Success to "Fastboot connected ✓"
-        DeviceMode.ADB -> Cyan to "ADB connected ✓"
-        DeviceMode.RECOVERY -> Amber to "Recovery / sideload ✓"
-        DeviceMode.MTK -> Amber to "MediaTek device identified ✓"
+        DeviceMode.FASTBOOT -> Success to "Fastboot connected ✓ — proceed at your own risk"
+        DeviceMode.ADB -> Cyan to "ADB connected ✓ — the device trusts you now"
+        DeviceMode.RECOVERY -> Amber to "Recovery / sideload ✓ — danger zone, nicely lit"
         DeviceMode.NONE -> {
             val problem = when {
-                mtkStatus is MtkState.Arming -> "Watching USB for a MediaTek device…"
-                adbStatus is AdbState.NeedPermission || usbStatus is UsbState.NeedPermission -> "Approve the USB prompt"
+                adbStatus is AdbState.NeedPermission || usbStatus is UsbState.NeedPermission -> "Approve the USB prompt (yes, the scary one)"
                 adbStatus is AdbState.Error -> adbStatus.message
                 usbStatus is UsbState.Error -> usbStatus.message
-                mtkStatus is MtkState.Error -> mtkStatus.message
-                mtkStatus is MtkState.NeedPermission -> "Approve the MTK USB prompt"
                 adbStatus is AdbState.NoDevice && usbStatus is UsbState.NoDevice ->
-                    "No ADB/fastboot device — check OTG cable and mode"
+                    "No ADB/fastboot device — check the OTG cable and the mode before blaming the app"
                 else -> "Press Detect to scan for devices"
             }
             Warning to problem

@@ -1,5 +1,6 @@
 package com.netherish.flashbridge
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -22,14 +23,6 @@ class MainActivity : ComponentActivity() {
         if (!uris.isNullOrEmpty()) vm.addFiles(uris)
     }
 
-    private val daPicker = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) vm.loadDa(uri)
-    }
-
-    private val authPicker = registerForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
-        if (!uris.isNullOrEmpty()) vm.loadAuth(uris)
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -41,8 +34,14 @@ class MainActivity : ComponentActivity() {
                     FlashBridgeScreen(
                         vm = vm,
                         onPickFiles = { filePicker.launch("*/*") },
-                        onPickDa = { daPicker.launch("*/*") },
-                        onPickAuth = { authPicker.launch("*/*") },
+                        onShareLog = { text ->
+                            val intent = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_TEXT, text)
+                                putExtra(Intent.EXTRA_SUBJECT, "FlashBridge session log")
+                            }
+                            startActivity(Intent.createChooser(intent, "Share session log"))
+                        },
                     )
                 }
             }
