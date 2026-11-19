@@ -8,7 +8,17 @@
 ![Platform](https://img.shields.io/badge/Platform-Android-3DDC84?logo=android&logoColor=white)
 ![Status](https://img.shields.io/badge/Status-working-brightgreen)
 
+[⬇️ **Download FlashBridge APK (v1.1)**](https://github.com/netherish/FlashBridge/releases/download/v1.1/flashbridge.apk)
+
 </div>
+
+---
+
+## Download
+
+**[Download the latest APK (v1.1)](https://github.com/netherish/FlashBridge/releases/download/v1.1/flashbridge.apk)** — 12.4 MB · Android 8.0+ · no root required
+
+Or browse [all releases](https://github.com/netherish/FlashBridge/releases).
 
 ---
 
