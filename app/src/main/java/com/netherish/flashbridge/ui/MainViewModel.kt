@@ -4,6 +4,8 @@ import android.app.Application
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.netherish.flashbridge.core.AdbState
+import com.netherish.flashbridge.core.AdbUsb
 import com.netherish.flashbridge.core.FastbootUsb
 import com.netherish.flashbridge.core.UsbInfo
 import com.netherish.flashbridge.core.UsbState
@@ -14,22 +16,28 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 enum class Busy { None, Running }
+enum class DeviceMode { NONE, FASTBOOT, ADB }
 
 data class UiState(
     val busy: Busy = Busy.None,
-    val log: String = "FlashBridge ready — no root required.\nConnect a device in fastboot mode via OTG.\n",
+    val log: String = "FlashBridge ready — no root required.\nConnect a device in ADB or fastboot mode via OTG.\n",
     val selectedFile: String = "",
     val partition: String = "boot",
     val progress: String = "",
     val lastResultOk: Boolean? = null,
+    val deviceMode: DeviceMode = DeviceMode.NONE,
+    val adbModel: String = "",
 )
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val fastboot = FastbootUsb(app)
+    private val adb = AdbUsb(app)
 
     val usbStatus: StateFlow<UsbState> = fastboot.status
+    val adbStatus: StateFlow<AdbState> = adb.status
     val usbDevice: StateFlow<UsbInfo?> = fastboot.deviceInfo
+    val adbDevice: StateFlow<UsbInfo?> = adb.deviceInfo
 
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state
@@ -40,11 +48,50 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (!fastboot.hasUsbHost()) {
             append("⚠ This device has no USB host (OTG) support.")
         }
+
+        viewModelScope.launch {
+            fastboot.status.collect { st ->
+                if (st is UsbState.Connected) {
+                    _state.value = _state.value.copy(deviceMode = DeviceMode.FASTBOOT)
+                    append("✓ Fastboot device connected")
+                }
+            }
+        }
+        viewModelScope.launch {
+            adb.status.collect { st ->
+                if (st is AdbState.Connected) {
+                    _state.value = _state.value.copy(deviceMode = DeviceMode.ADB)
+                    append("✓ ADB device connected")
+                    // Fetch model info off the main thread
+                    viewModelScope.launch {
+                        try {
+                            val model = withContext(Dispatchers.IO) { adb.getprop("ro.product.model") }
+                            val device = withContext(Dispatchers.IO) { adb.getprop("ro.product.device") }
+                            _state.value = _state.value.copy(
+                                adbModel = if (device.isNotEmpty()) "$model ($device)" else model
+                            )
+                            append("Device: $model ($device)")
+                        } catch (e: Throwable) {
+                            append("⚠ Could not read device info: ${e.message}")
+                        }
+                    }
+                }
+            }
+        }
     }
 
+    /** Scan USB for either a fastboot or ADB device. */
     fun scan() {
-        append("Scanning for fastboot device…")
+        append("Scanning for devices…")
+        fastboot.close()
+        adb.close()
+        _state.value = _state.value.copy(deviceMode = DeviceMode.NONE, adbModel = "")
+
         fastboot.scan()
+        val fbStatus = fastboot.status.value
+        if (fbStatus !is UsbState.NeedPermission && fbStatus !is UsbState.Connected) {
+            adb.scan()
+        }
     }
 
     fun onFileSelected(uri: Uri?) {
@@ -65,6 +112,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setPartition(value: String) {
         _state.value = _state.value.copy(partition = value.trim())
+    }
+
+    /** Reboot an ADB-connected device into fastboot mode. */
+    fun rebootToFastboot() = action("adb reboot bootloader") {
+        adb.reboot("bootloader")
+        append("✓ Reboot sent — device should enter fastboot")
+        append("Reconnect the device, then press Detect again.")
+        adb.close()
+        _state.value = _state.value.copy(deviceMode = DeviceMode.NONE)
     }
 
     fun getvar(name: String = "product") = action("getvar $name") {
@@ -133,5 +189,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     override fun onCleared() {
         super.onCleared()
         fastboot.dispose()
+        adb.dispose()
     }
 }

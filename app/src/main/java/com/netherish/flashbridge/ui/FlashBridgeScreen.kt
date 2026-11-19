@@ -19,6 +19,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.netherish.flashbridge.core.AdbState
 import com.netherish.flashbridge.core.UsbState
 import com.netherish.flashbridge.ui.theme.*
 
@@ -27,11 +28,16 @@ import com.netherish.flashbridge.ui.theme.*
 fun FlashBridgeScreen(vm: MainViewModel, onPickFile: () -> Unit) {
     val state by vm.state.collectAsState()
     val usbStatus by vm.usbStatus.collectAsState()
+    val adbStatus by vm.adbStatus.collectAsState()
     val scroll = rememberScrollState()
 
     var confirmUnlock by remember { mutableStateOf(false) }
     var confirmErase by remember { mutableStateOf(false) }
-    val connected = usbStatus is UsbState.Connected
+
+    val mode = state.deviceMode
+    val fastbootReady = mode == DeviceMode.FASTBOOT
+    val adbReady = mode == DeviceMode.ADB
+    val busy = state.busy != Busy.None
 
     Scaffold(
         topBar = {
@@ -61,7 +67,12 @@ fun FlashBridgeScreen(vm: MainViewModel, onPickFile: () -> Unit) {
             modifier = Modifier.padding(padding).fillMaxSize().verticalScroll(scroll).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            StatusCard(status = usbStatus)
+            StatusCard(
+                mode = mode,
+                usbStatus = usbStatus,
+                adbStatus = adbStatus,
+                adbModel = state.adbModel,
+            )
 
             Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF3A2A00)), shape = RoundedCornerShape(14.dp)) {
                 Row(Modifier.padding(14.dp), verticalAlignment = Alignment.Top) {
@@ -87,14 +98,42 @@ fun FlashBridgeScreen(vm: MainViewModel, onPickFile: () -> Unit) {
                 Text("Detect device", fontWeight = FontWeight.Bold)
             }
 
-            SectionTitle("Device actions")
+            // ADB mode: offer reboot into fastboot
+            if (adbReady) {
+                Card(colors = CardDefaults.cardColors(containerColor = Surface), shape = RoundedCornerShape(16.dp)) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("ADB device detected", color = Cyan, fontWeight = FontWeight.Bold)
+                        if (state.adbModel.isNotEmpty()) {
+                            Text(state.adbModel, color = TextPrimary, fontSize = 13.sp)
+                        }
+                        Text(
+                            "Reboot it into fastboot mode, then press Detect again to start flashing.",
+                            color = TextMuted, fontSize = 12.sp,
+                        )
+                        Button(
+                            onClick = { vm.rebootToFastboot() },
+                            modifier = Modifier.fillMaxWidth().height(48.dp),
+                            enabled = !busy,
+                            colors = ButtonDefaults.buttonColors(containerColor = Amber, contentColor = Color(0xFF1A1200)),
+                            shape = RoundedCornerShape(12.dp),
+                        ) {
+                            Icon(Icons.Filled.RestartAlt, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Reboot to Fastboot", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+
+            // Fastboot mode actions
+            SectionTitle("Fastboot actions")
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                ActionButton("Getvar", Icons.Filled.Info, Modifier.weight(1f), !connected || state.busy != Busy.None) { vm.getvar("product") }
-                ActionButton("Reboot", Icons.Filled.PowerSettingsNew, Modifier.weight(1f), !connected || state.busy != Busy.None) { vm.reboot() }
+                ActionButton("Getvar", Icons.Filled.Info, Modifier.weight(1f), !fastbootReady || busy) { vm.getvar("product") }
+                ActionButton("Reboot", Icons.Filled.PowerSettingsNew, Modifier.weight(1f), !fastbootReady || busy) { vm.reboot() }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                ActionButton("Erase", Icons.Filled.DeleteForever, Modifier.weight(1f), !connected || state.busy != Busy.None) { confirmErase = true }
-                ActionButton("Unlock", Icons.Filled.LockOpen, Modifier.weight(1f), !connected || state.busy != Busy.None) { confirmUnlock = true }
+                ActionButton("Erase", Icons.Filled.DeleteForever, Modifier.weight(1f), !fastbootReady || busy) { confirmErase = true }
+                ActionButton("Unlock", Icons.Filled.LockOpen, Modifier.weight(1f), !fastbootReady || busy) { confirmUnlock = true }
             }
 
             SectionTitle("Flash image")
@@ -137,7 +176,7 @@ fun FlashBridgeScreen(vm: MainViewModel, onPickFile: () -> Unit) {
                     Button(
                         onClick = { vm.flash() },
                         modifier = Modifier.fillMaxWidth().height(52.dp),
-                        enabled = connected && state.selectedFile.isNotEmpty() && state.busy == Busy.None,
+                        enabled = fastbootReady && state.selectedFile.isNotEmpty() && !busy,
                         colors = ButtonDefaults.buttonColors(
                             containerColor = Amber,
                             contentColor = Color(0xFF1A1200),
@@ -146,7 +185,7 @@ fun FlashBridgeScreen(vm: MainViewModel, onPickFile: () -> Unit) {
                         ),
                         shape = RoundedCornerShape(12.dp),
                     ) {
-                        if (state.busy == Busy.Running) {
+                        if (busy) {
                             CircularProgressIndicator(Modifier.size(20.dp), color = Color(0xFF1A1200))
                         } else {
                             Icon(Icons.Filled.FlashOn, contentDescription = null)
@@ -166,7 +205,7 @@ fun FlashBridgeScreen(vm: MainViewModel, onPickFile: () -> Unit) {
                 )
             }
 
-            Text("Developed by netherish · v1.0", color = TextMuted, fontSize = 11.sp,
+            Text("Developed by netherish · v1.1", color = TextMuted, fontSize = 11.sp,
                 modifier = Modifier.align(Alignment.CenterHorizontally).padding(bottom = 16.dp))
         }
     }
@@ -206,13 +245,33 @@ private fun SectionTitle(text: String) {
 }
 
 @Composable
-private fun StatusCard(status: UsbState) {
-    val (color, title, detail) = when (status) {
-        is UsbState.Connected -> Triple(Success, "Device connected ✓", "VID 0x%04X · PID 0x%04X".format(status.info.vendorId, status.info.productId))
-        is UsbState.NeedPermission -> Triple(Warning, "Permission required", "Approve the USB access prompt")
-        is UsbState.NoDevice -> Triple(Warning, "No fastboot device", status.message)
-        is UsbState.Error -> Triple(Error, "Error", status.message)
-        UsbState.Idle -> Triple(TextMuted, "Not connected", "Press Detect to scan for a device")
+private fun StatusCard(
+    mode: DeviceMode,
+    usbStatus: UsbState,
+    adbStatus: AdbState,
+    adbModel: String,
+) {
+    val (color, title, detail) = when (mode) {
+        DeviceMode.FASTBOOT -> Triple(
+            Success, "Fastboot device connected ✓",
+            (usbStatus as? UsbState.Connected)?.info?.let { "VID 0x%04X · PID 0x%04X".format(it.vendorId, it.productId) } ?: ""
+        )
+        DeviceMode.ADB -> Triple(
+            Cyan, "ADB device connected ✓",
+            adbModel.ifEmpty { (adbStatus as? AdbState.Connected)?.info?.name ?: "USB debugging device" }
+        )
+        DeviceMode.NONE -> {
+            val problem = when {
+                adbStatus is AdbState.NeedPermission || usbStatus is UsbState.NeedPermission ->
+                    "Approve the USB access prompt"
+                adbStatus is AdbState.Error -> adbStatus.message
+                usbStatus is UsbState.Error -> usbStatus.message
+                adbStatus is AdbState.NoDevice && usbStatus is UsbState.NoDevice ->
+                    "No ADB or fastboot device — check OTG cable and device mode"
+                else -> "Press Detect to scan for ADB or fastboot devices"
+            }
+            Triple(Warning, "No device connected", problem)
+        }
     }
     val animated by animateColorAsState(color)
     Card(colors = CardDefaults.cardColors(containerColor = Surface), shape = RoundedCornerShape(16.dp)) {
