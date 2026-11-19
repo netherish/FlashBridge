@@ -8,7 +8,7 @@
 ![Platform](https://img.shields.io/badge/Platform-Android-3DDC84?logo=android&logoColor=white)
 ![Status](https://img.shields.io/badge/Status-working-brightgreen)
 
-[⬇️ **Download FlashBridge APK (v1.2)**](https://github.com/netherish/FlashBridge/releases/download/v1.2/flashbridge.apk)
+[⬇️ **Download FlashBridge APK (v1.3 Advanced)**](https://github.com/netherish/FlashBridge/releases/download/v1.3/flashbridge.apk)
 
 </div>
 
@@ -16,7 +16,7 @@
 
 ## Download
 
-**[Download the latest APK (v1.2)](https://github.com/netherish/FlashBridge/releases/download/v1.2/flashbridge.apk)** — 12.4 MB · Android 8.0+ · no root required
+**[Download the latest APK (v1.3 Advanced)](https://github.com/netherish/FlashBridge/releases/download/v1.3/flashbridge.apk)** — Android 8.0+ · no root required
 
 Or browse [all releases](https://github.com/netherish/FlashBridge/releases).
 
@@ -40,13 +40,29 @@ It speaks the **fastboot** and **ADB** protocols directly over Android's USB Hos
 
 ## Features
 
-- 🔍 **ADB device detection** — detects devices in normal Android mode with USB debugging enabled, reads their model/device props, and can reboot them straight into fastboot
-- ⚡ **Fastboot flashing** — `flash`, `erase`, `getvar`, `reboot`, `flashing unlock` over raw USB
-- 📦 **Any partition** — boot, recovery, system, vendor, vbmeta — type the name, pick the image
-- 📁 **Local file picker** — choose any image/ROM file from host storage; streamed directly over USB
-- 📊 **Live progress** — real-time transfer percentage and full command log
-- 🛡️ **Safety confirmations** — destructive actions (erase, unlock) require explicit confirmation
+### Advanced Flash tab
+- 📦 **Multi-image queue** — add multiple files at once, set each partition independently, flash the whole queue in one run
+- 🔐 **SHA-256 checksum** computed for every queued image
+- 🧩 **Any partition** — boot, recovery, system, vendor, vbmeta — type the name, pick the image
+- 🚀 **Temporary boot** — `fastboot boot` without permanently flashing
+
+### Fastboot tools
+- ⚡ Full command suite: `flash`, `boot`, `erase`, `format`, `wipe`, `getvar all`, `set_active`, `flashing unlock/lock`, `unlock_critical`, `oem`, raw commands
+- 🔀 A/B slot switching, reboot to system / recovery / fastboot / continue
+- 🛡️ Safety confirmations on every destructive action
+
+### ADB tools
+- 🔍 ADB detection with full RSA auth handshake and device info (`getprop`)
+- 💻 **ADB shell** with output console
+- 📲 **ADB sideload** — install ROMs, GApps and OTA ZIPs directly from recovery
+- 📤 **ADB push** via the sync protocol with progress
+- 🔁 Reboot to bootloader / recovery / fastboot / download / system
+
+### Everywhere-compatible core
 - 🔓 **No root, no binaries** — pure Kotlin implementation using the Android USB Host API
+- 🌐 Universal fastboot detection by USB interface class — works across vendors
+- 📊 Live transfer progress, device info panel, and full session log
+- 🎨 Tabbed Material 3 advanced interface (Flash / Fastboot / ADB / Console)
 
 ---
 
@@ -86,6 +102,14 @@ Fastboot is text commands over bulk USB:
 3. Verify the final `OKAY` reply.
 
 This is the same protocol `fastboot` on a PC uses — implemented natively in Kotlin, so no external binaries or root shell are involved.
+
+### Sideload (recovery)
+
+Boot the target into custom recovery, choose **Apply update → Apply from ADB**, connect, press Detect, then **Sideload ZIP** on the Flash or ADB tab. The ZIP is streamed over the ADB `sideload:` service with live progress — exactly like `adb sideload` on a PC.
+
+### Limitations
+
+Standard fastboot and ADB devices are supported across vendors. Samsung (Odin/download mode), MediaTek (SP Flash Tool) and Qualcomm 9008 (QFIL) use proprietary protocols that cannot be driven through fastboot/ADB. Bootloader unlock may additionally require OEM unlocking to be enabled, a Mi-account authorization (Xiaomi), or internet access depending on the vendor.
 
 ---
 

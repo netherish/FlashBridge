@@ -223,6 +223,76 @@ class FastbootUsb(private val context: Context) {
         if (r.status == "FAIL") throw IOException(r.payload.trim().ifEmpty { "Unlock failed" })
     }
 
+    // ---- Extended fastboot command suite --------------------------------
+
+    /** Run any raw fastboot command (advanced users) and return every INFO line. */
+    fun raw(cmd: String): String = simple(cmd).joinToString("\n")
+
+    /** `getvar all` — dump every bootloader variable. */
+    fun getvarAll(): String {
+        var reply = command("getvar:all")
+        val lines = mutableListOf<String>()
+        while (reply.status == "INFO") {
+            lines += reply.payload.trim()
+            reply = readMore()
+        }
+        if (reply.status == "FAIL") throw IOException(reply.payload.trim().ifEmpty { "getvar all failed" })
+        return lines.joinToString("\n")
+    }
+
+    /** Boots an image without flashing it (temporary boot). */
+    fun boot(input: InputStream, onProgress: (Long, Long) -> Unit) = downloadAndExecute("boot", input, onProgress)
+
+    /** Flash and immediately boot (flash: + reboot). */
+    fun flashAndBoot(partition: String, input: InputStream, onProgress: (Long, Long) -> Unit) {
+        flash(partition, input, onProgress)
+        reboot()
+    }
+
+    private fun downloadAndExecute(cmd: String, input: InputStream, onProgress: (Long, Long) -> Unit) {
+        var reply = command(cmd)
+        while (reply.status == "INFO") reply = readMore()
+        if (reply.status == "FAIL") throw IOException(reply.payload.trim().ifEmpty { "$cmd rejected" })
+        if (reply.status != "DATA") throw IOException("Expected DATA, got ${reply.status}")
+        streamData(reply.payload.trim().toLong(16), input, onProgress)
+        val final = readMore(60000)
+        if (final.status == "FAIL") throw IOException(final.payload.trim().ifEmpty { "$cmd failed" })
+    }
+
+    private fun streamData(total: Long, input: InputStream, onProgress: (Long, Long) -> Unit) {
+        val chunk = ByteArray(16384)
+        var sent = 0L
+        while (sent < total) {
+            val want = minOf(chunk.size.toLong(), total - sent).toInt()
+            val read = input.read(chunk, 0, want)
+            if (read <= 0) throw IOException("Unexpected end of image")
+            val w = connection!!.bulkTransfer(bulkOut, chunk, read, 10000)
+            if (w != read) throw IOException("Bulk data write failed")
+            sent += read
+            onProgress(sent, total)
+        }
+    }
+
+    fun reboot(target: String) = simple("reboot-$target")
+    fun rebootBootloader() = simple("reboot-bootloader")
+    fun rebootRecovery() = simple("reboot-recovery")
+    fun rebootFastboot() = simple("reboot-fastboot")
+    fun continueBoot() = simple("continue")
+    fun flashingLock() = simple("flashing lock")
+    fun flashingLockCritical() = simple("flashing lock_critical")
+    fun flashingUnlockCritical() = simple("flashing unlock_critical")
+    fun flashingLockVendor() = simple("flashing lock_vendor")
+    fun flashingUnlockVendor() = simple("flashing unlock_vendor")
+    fun setActive(slot: String) = simple("set_active:$slot")
+    fun format(partition: String) = simple("format:$partition")
+    fun wipe() = simple("wipe")
+    fun oem(command: String): String = simple("oem $command").joinToString("\n")
+    fun flashingGetUnlockAbility(): String = getvar("unlock_ability")
+    fun deviceState(): String = getvar("state")
+    fun isUnlocked(): Boolean = try {
+        getvar("unlocked") == "yes" || getvar("device-state") == "unlocked"
+    } catch (_: Throwable) { false }
+
     fun close() {
         try { connection?.close() } catch (_: Throwable) {}
         connection = null

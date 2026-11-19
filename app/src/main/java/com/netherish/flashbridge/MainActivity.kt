@@ -18,8 +18,8 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var vm: MainViewModel
 
-    private val filePicker = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        vm.onFileSelected(uri)
+    private val filePicker = registerForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
+        if (!uris.isNullOrEmpty()) vm.addFiles(uris)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -32,7 +32,7 @@ class MainActivity : ComponentActivity() {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     FlashBridgeScreen(
                         vm = vm,
-                        onPickFile = { filePicker.launch("*/*") },
+                        onPickFiles = { filePicker.launch("*/*") },
                     )
                 }
             }

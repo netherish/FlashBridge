@@ -14,6 +14,7 @@ import android.os.Build
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.io.IOException
+import java.io.InputStream
 import java.math.BigInteger
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -44,6 +45,7 @@ class AdbUsb(private val context: Context) {
     private var bulkIn: UsbEndpoint? = null
     private var connected = false
     private var remoteId = 0
+    private var maxData = 4096
 
     private val _status = MutableStateFlow<AdbState>(AdbState.Idle)
     val status: StateFlow<AdbState> = _status
@@ -181,6 +183,8 @@ class AdbUsb(private val context: Context) {
         if (reply.command != A_CNXN) {
             throw IOException("ADB auth failed: ${cmdName(reply.command)}")
         }
+        // Device tells us its max payload in arg1 of its CNXN
+        maxData = reply.arg1.takeIf { it in 4096..(1024 * 1024) } ?: 4096
     }
 
     private fun sendPublicKey() {
@@ -231,13 +235,94 @@ class AdbUsb(private val context: Context) {
         return out.toString()
     }
 
-    /** Reboot the device into the given target (e.g. "bootloader"). */
+    /** Reboot the device into the given target (e.g. "bootloader", "recovery", "download"). */
     fun reboot(target: String = "bootloader") {
         requireConnected()
         val localId = 2
         val dest = "reboot:$target\u0000".toByteArray(Charsets.US_ASCII)
         sendPacket(AdbPacket(A_OPEN, localId, 0, dest))
         // Device reboots immediately; don't block waiting for a reply.
+    }
+
+    /**
+     * ADB sideload — stream a ZIP (ROM / GApps / OTA) to a device in
+     * recovery mode. This is how most custom ROMs are actually installed.
+     */
+    fun sideload(input: InputStream, size: Long, onProgress: (Long, Long) -> Unit) {
+        requireConnected()
+        val localId = 5
+        val dest = "sideload:\u0000".toByteArray(Charsets.US_ASCII)
+        sendPacket(AdbPacket(A_OPEN, localId, 0, dest))
+
+        var reply = readPacket(60000) // recovery can take a while to start
+        if (reply.command == A_FAIL) throw IOException(String(reply.data, Charsets.UTF_8).trim())
+        if (reply.command != A_OKAY) throw IOException("Sideload OPEN failed: ${cmdName(reply.command)}")
+        remoteId = reply.arg0
+
+        val chunk = ByteArray(maxData)
+        var sent = 0L
+        while (sent < size) {
+            val want = minOf(chunk.size.toLong(), size - sent).toInt()
+            val read = input.read(chunk, 0, want)
+            if (read <= 0) break
+            sendPacket(AdbPacket(A_WRTE, localId, remoteId, chunk.copyOf(read)))
+            reply = readPacket(60000)
+            if (reply.command == A_FAIL) throw IOException(String(reply.data, Charsets.UTF_8).trim())
+            if (reply.command == A_CLSE) throw IOException("Device closed sideload early")
+            sent += read
+            onProgress(sent, size)
+        }
+        sendPacket(AdbPacket(A_CLSE, localId, remoteId, ByteArray(0)))
+        try { readPacket(60000) } catch (_: Throwable) {}
+    }
+
+    /** Push a file to the device via the ADB `sync:` service. */
+    fun push(input: InputStream, size: Long, remotePath: String, permission: Int = 420,
+             onProgress: (Long, Long) -> Unit) {
+        requireConnected()
+        val localId = 6
+        sendPacket(AdbPacket(A_OPEN, localId, 0, "sync:\u0000".toByteArray(Charsets.US_ASCII)))
+        var reply = readPacket(10000)
+        if (reply.command != A_OKAY) throw IOException("sync OPEN failed: ${cmdName(reply.command)}")
+        remoteId = reply.arg0
+
+        val spec = "$remotePath,$permission".toByteArray(Charsets.UTF_8)
+        val sendHeader = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
+            .put("SEND".toByteArray(Charsets.US_ASCII)).putInt(spec.size).array()
+        sendPacket(AdbPacket(A_WRTE, localId, remoteId, sendHeader))
+        waitOkay(localId, 10000)
+        sendPacket(AdbPacket(A_WRTE, localId, remoteId, spec))
+        waitOkay(localId, 10000)
+
+        val chunk = ByteArray(64 * 1024)
+        var sent = 0L
+        while (sent < size) {
+            val want = minOf(chunk.size.toLong(), size - sent).toInt()
+            val read = input.read(chunk, 0, want)
+            if (read <= 0) break
+            val header = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
+                .put("DATA".toByteArray(Charsets.US_ASCII)).putInt(read).array()
+            val payload = header + chunk.copyOf(read)
+            sendPacket(AdbPacket(A_WRTE, localId, remoteId, payload))
+            waitOkay(localId, 10000)
+            sent += read
+            onProgress(sent, size)
+        }
+
+        val done = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
+            .put("DONE".toByteArray(Charsets.US_ASCII))
+            .putInt((System.currentTimeMillis() / 1000).toInt()).array()
+        sendPacket(AdbPacket(A_WRTE, localId, remoteId, done))
+        waitOkay(localId, 10000)
+        sendPacket(AdbPacket(A_WRTE, localId, remoteId, "QUIT".toByteArray(Charsets.US_ASCII)))
+        waitOkay(localId, 10000)
+        sendPacket(AdbPacket(A_CLSE, localId, remoteId, ByteArray(0)))
+    }
+
+    private fun waitOkay(localId: Int, timeout: Int) {
+        val reply = readPacket(timeout)
+        if (reply.command == A_FAIL) throw IOException(String(reply.data, Charsets.UTF_8).trim())
+        if (reply.command != A_OKAY) throw IOException("Expected OKAY, got ${cmdName(reply.command)}")
     }
 
     fun close() {
